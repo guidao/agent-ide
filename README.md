@@ -1,6 +1,7 @@
 # agent-ide
 
 > Native Emacs transcript UI for AI agents over the [Agent Communication Protocol](https://agentcommunicationprotocol.dev/) (ACP).
+> UI design inspired by [codex-ide](https://github.com/agnt-gg/codex-ide).
 
 **agent-ide** brings any ACP-compatible coding agent directly into Emacs. It renders agent messages, tool calls, diffs, and permission prompts in a rich, read-only transcript buffer — with a fully editable prompt at the bottom. Think of it as Emacs's answer to agent chat panels, but natively integrated: keyboard-driven, theme-aware, and hackable in Emacs Lisp.
 
