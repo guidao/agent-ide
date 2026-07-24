@@ -117,10 +117,20 @@
                        (outputTokens . 234)))
               (modelContextWindow . 200000)))
       (let ((summary (agent-ide-renderer--header-summary session)))
-        (should (string-match-p "Agent \\[idle\\]" summary))
-        (should (string-match-p "Model: Large" summary))
-        (should (string-match-p "Context: 12.3k/200.0k" summary))
-        (should (string-match-p "Last: in 1.0k out 234" summary))))))
+        (should (string-match-p "Large" summary))
+        (should (string-match-p "12\\.3k/200\\.0k tokens" summary))))))
+
+(ert-deftest agent-ide-renderer-header-shows-acp-usage-update ()
+  "Header summary understands ACP usage_update used/size fields."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((session (agent-ide-session-mode-test--session)))
+      (setf (agent-ide-session-usage session)
+            '((sessionUpdate . "usage_update")
+              (used . 53000)
+              (size . 200000)))
+      (let ((summary (agent-ide-renderer--header-summary session)))
+        (should (string-match-p "53\\.0k/200\\.0k tokens" summary))))))
 
 (ert-deftest agent-ide-renderer-header-handles-available-models ()
   "Header summary uses currentModelId from agent ACP models responses."
@@ -190,7 +200,88 @@
       (should (memq 'bold (ensure-list (get-text-property (1- (point))
                                                           'face))))
       (search-forward "file")
-      (should (button-at (1- (point)))))))
+      (let ((button (button-at (1- (point)))))
+        (should button)
+        (should (equal (button-get button 'agent-ide-url)
+                       "/tmp/foo.el#L3C2"))))))
+
+(ert-deftest agent-ide-renderer-message-renders-bare-urls ()
+  "Assistant messages turn bare URLs into followable buttons."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((session (agent-ide-session-mode-test--session)))
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (agent-ide-renderer-append-stream-chunk
+       session 'message
+       "See https://example.com/path for details.")
+      (goto-char (point-min))
+      (search-forward "https://example.com/path")
+      (let ((button (button-at (1- (point)))))
+        (should button)
+        (should (equal (button-get button 'agent-ide-url)
+                       "https://example.com/path"))))))
+
+(ert-deftest agent-ide-follow-thing-at-point-opens-markdown-link ()
+  "C-c C-o opens Markdown link URLs at point."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let* ((session (agent-ide-session-mode-test--session))
+           (opened nil))
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (agent-ide-renderer-append-stream-chunk
+       session 'message
+       "[docs](https://example.com/docs)")
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (url &rest _) (setq opened url))))
+        (goto-char (point-min))
+        (search-forward "docs")
+        (backward-char)
+        (agent-ide-follow-thing-at-point)
+        (should (equal opened "https://example.com/docs"))))))
+
+(ert-deftest agent-ide-follow-thing-at-point-opens-bare-url ()
+  "C-c C-o opens bare URLs at point."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let* ((session (agent-ide-session-mode-test--session))
+           (opened nil))
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (agent-ide-renderer-append-stream-chunk
+       session 'message
+       "Visit https://example.com/bare please.")
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (url &rest _) (setq opened url))))
+        (goto-char (point-min))
+        (search-forward "https://example.com/bare")
+        (backward-char)
+        (agent-ide-follow-thing-at-point)
+        (should (equal opened "https://example.com/bare"))))))
+
+(ert-deftest agent-ide-follow-thing-at-point-opens-file-path ()
+  "C-c C-o opens local file paths from Markdown links."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let* ((session (agent-ide-session-mode-test--session))
+           (opened nil)
+           (tmp (make-temp-file "agent-ide-follow-")))
+      (unwind-protect
+          (progn
+            (setq-local agent-ide--session session)
+            (agent-ide-renderer-initialize-buffer session)
+            (agent-ide-renderer-append-stream-chunk
+             session 'message
+             (format "[file](%s)" tmp))
+            (cl-letf (((symbol-function 'find-file)
+                       (lambda (file &rest _) (setq opened file))))
+              (goto-char (point-min))
+              (search-forward "file")
+              (backward-char)
+              (agent-ide-follow-thing-at-point)
+              (should (equal opened tmp))))
+        (delete-file tmp)))))
 
 (ert-deftest agent-ide-renderer-message-renders-indented-code-fence ()
   "Assistant messages render fenced code blocks after leading whitespace."
