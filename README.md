@@ -8,8 +8,8 @@
 ## Requirements
 
 - **Emacs** ≥ 29.1
-- **[acp.el](https://github.com/agnt-gg/acp)** ≥ 0.11.1 — ACP client library
-- **[valign](https://github.com/casouri/valign)** ≥ 3.1 — visual table alignment
+- **[acp.el](https://github.com/xenodium/acp.el)** ≥ 0.11.1 — ACP client library
+- **[valign](https://github.com//casouri/valign)** ≥ 3.1 — visual table alignment
 
 ## Installation
 

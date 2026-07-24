@@ -8,8 +8,10 @@
 
 (require 'agent-ide-core)
 (require 'agent-ide-renderer)
+(require 'button)
 (require 'seq)
 (require 'subr-x)
+(require 'thingatpt)
 (require 'valign)
 
 (defun agent-ide--valign-guess-table-type (orig-fn)
@@ -32,6 +34,7 @@
     (set-keymap-parent map text-mode-map)
     (define-key map (kbd "C-c C-c") #'agent-ide-interrupt)
     (define-key map (kbd "C-c C-k") #'agent-ide-interrupt)
+    (define-key map (kbd "C-c C-o") #'agent-ide-follow-thing-at-point)
     (define-key map (kbd "C-c C-r") #'agent-ide-restart)
     (define-key map (kbd "C-c C-y") #'agent-ide-yank-region)
     (define-key map (kbd "C-c C-m") #'agent-ide-submit)
@@ -255,6 +258,27 @@ already show a postframe/posframe avoid an extra *Completions* buffer."
   "Replace prompt with the next history entry."
   (interactive)
   (agent-ide-session-mode--cycle-history 1))
+
+(defun agent-ide-follow-thing-at-point ()
+  "Open the Markdown link, bare URL, or local path at point.
+Full URLs open with `browse-url'; file paths open with `find-file'."
+  (interactive)
+  (cond
+   ((when-let* ((button (button-at (point)))
+                (url (button-get button 'agent-ide-url)))
+      (agent-ide-renderer-open-url url)
+      t))
+   ((when-let* ((url (thing-at-point 'url t)))
+      (agent-ide-renderer-open-url url)
+      t))
+   ((when-let* ((file (thing-at-point 'filename t)))
+      (when (or (file-name-absolute-p file)
+                (file-exists-p file)
+                (file-exists-p (expand-file-name file)))
+        (find-file file)
+        t)))
+   (t
+    (user-error "Nothing to follow at point"))))
 
 (defun agent-ide-session-mode--cycle-history (delta)
   "Cycle current prompt history by DELTA."

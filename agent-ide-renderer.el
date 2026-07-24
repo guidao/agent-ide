@@ -6,12 +6,15 @@
 
 ;;; Code:
 
+(require 'browse-url)
 (require 'button)
 (require 'cl-lib)
 (require 'color)
 (require 'map)
 (require 'seq)
 (require 'subr-x)
+(require 'thingatpt)
+(require 'url-parse)
 (require 'agent-ide-core)
 
 (defface agent-ide-header-face
@@ -803,6 +806,34 @@ DELIMITER-GROUPS is a list of match groups to hide."
                              (match-end 2)
                              '(agent-ide-markdown t))))))
 
+(defun agent-ide-renderer-open-url (url)
+  "Open URL like markdown-mode: full URLs in a browser, paths via find-file."
+  (let* ((struct (url-generic-parse-url url))
+         (full (url-fullness struct))
+         (file (or (car (url-path-and-query struct)) url)))
+    (if full
+        (browse-url url)
+      (when (and file (> (length file) 0))
+        (when (string-match "\\`\\([^#?]+\\)" file)
+          (setq file (match-string 1 file)))
+        (find-file file)))))
+
+(defun agent-ide-renderer-follow-url-button (button)
+  "Follow URL stored on BUTTON."
+  (when-let* ((url (button-get button 'agent-ide-url)))
+    (agent-ide-renderer-open-url url)))
+
+(defun agent-ide-renderer--make-url-button (start end url)
+  "Make text in START..END a button that opens URL."
+  (make-text-button start end
+                    'follow-link t
+                    'keymap agent-ide-action-button-map
+                    'face 'link
+                    'action #'agent-ide-renderer-follow-url-button
+                    'agent-ide-url url
+                    'help-echo url
+                    'agent-ide-markdown t))
+
 (defun agent-ide-renderer--render-markdown-links (start end)
   "Render simple Markdown links in START..END."
   (save-excursion
@@ -811,22 +842,37 @@ DELIMITER-GROUPS is a list of match groups to hide."
       (unless (agent-ide-renderer--markdown-code-content-p
                (match-beginning 0)
                (match-end 0))
-        (add-text-properties (match-beginning 1)
-                             (match-end 1)
-                             '(display "" agent-ide-markdown t))
-        (add-text-properties (match-beginning 3)
-                             (match-end 3)
-                             '(display "" agent-ide-markdown t))
-        (add-text-properties (match-beginning 4)
-                             (match-end 5)
-                             '(display "" agent-ide-markdown t))
-        (make-text-button (match-beginning 2)
-                          (match-end 2)
-                          'follow-link t
-                          'keymap agent-ide-action-button-map
-                          'face 'link
-                          'help-echo (match-string-no-properties 4)
-                          'agent-ide-markdown t)))))
+        (let ((url (match-string-no-properties 4)))
+          (add-text-properties (match-beginning 1)
+                               (match-end 1)
+                               '(display "" agent-ide-markdown t))
+          (add-text-properties (match-beginning 3)
+                               (match-end 3)
+                               '(display "" agent-ide-markdown t))
+          (add-text-properties (match-beginning 4)
+                               (match-end 5)
+                               '(display "" agent-ide-markdown t))
+          (agent-ide-renderer--make-url-button
+           (match-beginning 2)
+           (match-end 2)
+           url))))))
+
+(defun agent-ide-renderer--render-bare-urls (start end)
+  "Render bare URLs in START..END as followable buttons."
+  (let ((regexp (or (bound-and-true-p browse-url-button-regexp)
+                    (bound-and-true-p thing-at-point-url-regexp))))
+    (when regexp
+      (save-excursion
+        (goto-char start)
+        (while (re-search-forward regexp end t)
+          (let ((url-start (match-beginning 0))
+                (url-end (match-end 0))
+                (url (match-string-no-properties 0)))
+            (unless (or (button-at url-start)
+                        (get-text-property url-start 'display)
+                        (agent-ide-renderer--markdown-code-content-p
+                         url-start url-end))
+              (agent-ide-renderer--make-url-button url-start url-end url))))))))
 
 (defun agent-ide-renderer--render-command-lines (start end)
   "Apply `agent-ide-muted-face' to shell-command lines in START..END.
@@ -852,6 +898,7 @@ Table alignment is handled by `valign-mode'."
       (agent-ide-renderer--render-markdown-headings start (marker-position end-marker))
       (agent-ide-renderer--render-command-lines start (marker-position end-marker))
       (agent-ide-renderer--render-markdown-links start (marker-position end-marker))
+      (agent-ide-renderer--render-bare-urls start (marker-position end-marker))
       (agent-ide-renderer--render-markdown-inline-code start (marker-position end-marker))
       (agent-ide-renderer--render-markdown-emphasis start (marker-position end-marker))
       ;; Explicitly align tables via valign after markdown rendering.
@@ -1182,17 +1229,24 @@ Each entry is a cons of (display . model-id)."
   (agent-ide-renderer--map-elt-any
    usage-block '(outputTokens output completionTokens completion)))
 
+(defun agent-ide-renderer--context-used (usage)
+  "Return tokens currently in context from USAGE.
+Prefers ACP `usage_update' fields (`used'), then legacy total-token blocks."
+  (or (agent-ide-renderer--map-elt-any usage '(used))
+      (let ((total (agent-ide-renderer--usage-total usage)))
+        (and total (agent-ide-renderer--token-total total)))))
+
 (defun agent-ide-renderer--context-window (usage)
-  "Return context window size from USAGE."
+  "Return context window size from USAGE.
+Prefers ACP `usage_update' `size', then legacy context-window fields."
   (agent-ide-renderer--map-elt-any
-   usage '(modelContextWindow contextWindow maxContextTokens maxInputTokens)))
+   usage '(size modelContextWindow contextWindow maxContextTokens maxInputTokens)))
 
 (defun agent-ide-renderer--context-label (usage)
   "Return context usage label for USAGE."
   (when usage
-    (let* ((total (agent-ide-renderer--usage-total usage))
-           (used (and total (agent-ide-renderer--token-total total)))
-           (window (agent-ide-renderer--context-window usage)))
+    (let ((used (agent-ide-renderer--context-used usage))
+          (window (agent-ide-renderer--context-window usage)))
       (when (and used window)
         (format "Context: %s/%s"
                 (agent-ide-renderer--compact-number used)
@@ -1220,9 +1274,8 @@ Each entry is a cons of (display . model-id)."
          (usage (agent-ide-session-usage session))
          (context-str
           (when usage
-            (let* ((total (agent-ide-renderer--usage-total usage))
-                   (used (and total (agent-ide-renderer--token-total total)))
-                   (window (agent-ide-renderer--context-window usage)))
+            (let ((used (agent-ide-renderer--context-used usage))
+                  (window (agent-ide-renderer--context-window usage)))
               (when (and used window)
                 (format "%s/%s tokens"
                         (agent-ide-renderer--compact-number used)
