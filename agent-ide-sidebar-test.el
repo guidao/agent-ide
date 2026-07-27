@@ -7,9 +7,14 @@
 
 (unless (featurep 'acp)
   (provide 'acp))
+(unless (featurep 'valign)
+  (provide 'valign)
+  (defun valign-mode (&rest _))
+  (defun valign--guess-table-type (&rest _)))
 
 (require 'agent-ide-core)
 (require 'agent-ide-renderer)
+(require 'agent-ide-session)
 (require 'agent-ide-sidebar)
 
 (defun agent-ide-sidebar-test--make-session (directory status &rest plist)
@@ -134,6 +139,39 @@ PLIST may include :models :usage :buffer-name."
         (setq agent-ide--sessions nil)
         (agent-ide-sidebar-on-sessions-changed)
         (should (null (get-buffer-window agent-ide-sidebar-buffer-name t))))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-select-displays-session-buffer ()
+  "RET displays the session buffer."
+  (unwind-protect
+      (let* ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle"))
+             (shown nil))
+        (setq agent-ide--sessions (list session))
+        (agent-ide-sidebar-refresh)
+        (cl-letf (((symbol-function 'agent-ide--display-buffer)
+                   (lambda (buffer)
+                     (setq shown buffer)
+                     nil)))
+          (with-current-buffer agent-ide-sidebar-buffer-name
+            (goto-char (point-min))
+            (agent-ide-sidebar-select))
+          (should (eq shown (agent-ide-session-buffer session)))))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-kill-removes-session ()
+  "k kills the session buffer and removes the entry."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle"))
+            (agent-ide-sidebar-confirm-kill nil))
+        (setq agent-ide--sessions (list session))
+        (with-current-buffer (agent-ide-session-buffer session)
+          (add-hook 'kill-buffer-hook #'agent-ide--handle-buffer-killed nil t))
+        (agent-ide-sidebar-refresh)
+        (with-current-buffer agent-ide-sidebar-buffer-name
+          (goto-char (point-min))
+          (agent-ide-sidebar-kill))
+        (should (null agent-ide--sessions))
+        (should (not (buffer-live-p (agent-ide-session-buffer session)))))
     (agent-ide-sidebar-test--teardown)))
 
 (provide 'agent-ide-sidebar-test)

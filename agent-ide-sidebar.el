@@ -10,6 +10,7 @@
 (require 'subr-x)
 (require 'agent-ide-core)
 (require 'agent-ide-renderer)
+(require 'agent-ide-session)
 
 (defgroup agent-ide-sidebar nil
   "Agent IDE session sidebar."
@@ -298,19 +299,40 @@ Visibility indicator uses ●/○ independently."
       (forward-line -1))))
 
 (defun agent-ide-sidebar-select ()
-  "Select the session at point."
+  "Display the session at point."
   (interactive)
-  (user-error "Not implemented"))
+  (let ((session (or (agent-ide-sidebar--session-at-point)
+                     (user-error "No session at point"))))
+    (unless (agent-ide--session-live-p session)
+      (user-error "Session is dead"))
+    (agent-ide--display-buffer (agent-ide-session-buffer session))
+    (agent-ide-sidebar-refresh)))
 
 (defun agent-ide-sidebar-kill ()
   "Kill the session at point."
   (interactive)
-  (user-error "Not implemented"))
+  (let* ((session (or (agent-ide-sidebar--session-at-point)
+                      (user-error "No session at point")))
+         (buffer (agent-ide-session-buffer session))
+         (was-current
+          (and (buffer-live-p buffer)
+               (get-buffer-window buffer t))))
+    (when (or (not agent-ide-sidebar-confirm-kill)
+              (y-or-n-p (format "Kill session %s? "
+                                (agent-ide--directory-name
+                                 (agent-ide-session-directory session)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (when (and was-current agent-ide--sessions)
+        (when-let* ((next (car agent-ide--sessions))
+                    ((agent-ide--session-live-p next)))
+          (agent-ide--display-buffer (agent-ide-session-buffer next)))))))
 
 (defun agent-ide-sidebar-new-session ()
   "Start a new Agent IDE session."
   (interactive)
-  (user-error "Not implemented"))
+  (setq agent-ide-sidebar--user-dismissed nil)
+  (agent-ide-new-session))
 
 (provide 'agent-ide-sidebar)
 
