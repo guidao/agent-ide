@@ -174,6 +174,19 @@ PLIST may include :models :usage :buffer-name."
         (should (not (buffer-live-p (agent-ide-session-buffer session)))))
     (agent-ide-sidebar-test--teardown)))
 
+(ert-deftest agent-ide-sidebar-status-change-updates-text ()
+  "agent-ide--set-status refreshes sidebar text."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
+        (setq agent-ide--sessions (list session))
+        (agent-ide-sidebar-refresh)
+        (agent-ide--set-status session "running")
+        (with-current-buffer agent-ide-sidebar-buffer-name
+          (should (string-match-p
+                   "running"
+                   (buffer-substring-no-properties (point-min) (point-max))))))
+    (agent-ide-sidebar-test--teardown)))
+
 (provide 'agent-ide-sidebar-test)
 
 ;;; agent-ide-sidebar-test.el ends here

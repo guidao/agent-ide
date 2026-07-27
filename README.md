@@ -90,6 +90,19 @@ The header shows: **model name** · **project directory** · **context usage** /
 - **Plan rendering** — when the agent produces a plan, entries are listed inline.
 - **Read-only transcript** — all agent output is frozen; only the current prompt is editable.
 
+### Session sidebar
+
+A left sidebar lists live sessions (status, model, usage). Open with `M-x agent-ide-sidebar`.
+
+| Key | Action |
+|---|---|
+| `RET` / mouse-1 | Display that session’s buffer via existing `agent-ide--display-buffer` |
+| `n` / `p` | Move by entry (two physical lines per entry) |
+| `k` | Kill session (confirm when `agent-ide-sidebar-confirm-kill` is non-nil) |
+| `+` / `c` | `agent-ide-new-session` |
+| `g` | Manual refresh |
+| `q` | Hide sidebar (set user-dismissed; do not kill sessions) |
+
 ## Configuration
 
 All options are under the `agent-ide` customize group (`M-x customize-group RET agent-ide`).
@@ -106,6 +119,9 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-mcp-servers` | `[]` | MCP servers passed to `session/new` |
 | `agent-ide-prompt-placeholder-text` | `"Tell Agent what to do..."` | Empty-prompt placeholder |
 | `agent-ide-running-placeholder-text` | `"Working..."` | Placeholder while the agent processes |
+| `agent-ide-sidebar-width` | `0.22` | Left side-window width |
+| `agent-ide-sidebar-auto-show` | `t` | Auto-show on session create; ignored for refresh while user-dismissed |
+| `agent-ide-sidebar-confirm-kill` | `t` | Confirm before kill |
 
 ### Example: Right-side panel
 
@@ -149,7 +165,7 @@ Opens each session in a right-side window at 42% width.
 | `agent-ide-reload-all` | — | Reload all project files in dependency order |
 | `agent-ide-reload-last` | — | Reload the most recently loaded file |
 
-File load order: `core` → `protocol` → `renderer` → `session-mode` → `session` → `transcript` → `agent-ide`.
+File load order: `core` → `protocol` → `renderer` → `session-mode` → `session` → `transcript` → `sidebar` → `agent-ide`.
 
 ## Architecture
 
@@ -160,7 +176,8 @@ agent-ide.el              Entry point, defcustom, require all
 ├── agent-ide-protocol.el ACP bridge (init, prompt, cancel, fs ops)
 ├── agent-ide-session-mode.el Major mode, keymaps, completion, edit guard
 ├── agent-ide-transcript.el   ACP event dispatch (notifications, requests)
-└── agent-ide-session.el  User commands, lifecycle, yank-region, set-model
+├── agent-ide-session.el  User commands, lifecycle, yank-region, set-model
+└── agent-ide-sidebar.el  Session list side window, switch/kill/new
 ```
 
 ## License
