@@ -130,6 +130,22 @@ PLIST may include :models :usage :buffer-name."
         (should (get-buffer-window agent-ide-sidebar-buffer-name t)))
     (agent-ide-sidebar-test--teardown)))
 
+(ert-deftest agent-ide-sidebar-create-refreshes-when-visible-even-if-auto-show-off ()
+  "Visible sidebar refreshes on create even when auto-show is nil."
+  (unwind-protect
+      (let ((agent-ide-sidebar-auto-show nil)
+            (a (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
+        (setq agent-ide--sessions (list a))
+        (agent-ide-sidebar)
+        (let ((b (agent-ide-sidebar-test--make-session "/tmp/b" "idle")))
+          (setq agent-ide--sessions (list b a))
+          (agent-ide-sidebar-on-session-created b)
+          (with-current-buffer agent-ide-sidebar-buffer-name
+            (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p "b" text))
+              (should (get-buffer-window agent-ide-sidebar-buffer-name t))))))
+    (agent-ide-sidebar-test--teardown)))
+
 (ert-deftest agent-ide-sidebar-hides-when-no-sessions ()
   "Cleanup of last session hides the sidebar."
   (unwind-protect

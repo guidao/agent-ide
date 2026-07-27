@@ -241,9 +241,14 @@ Visibility indicator uses ●/○ independently."
 
 (defun agent-ide-sidebar-on-session-created (&optional _session)
   "React to a newly created session."
-  (when agent-ide-sidebar-auto-show
+  (cond
+   ((agent-ide-sidebar--visible-p)
+    (when agent-ide-sidebar-auto-show
+      (setq agent-ide-sidebar--user-dismissed nil))
+    (agent-ide-sidebar-refresh))
+   (agent-ide-sidebar-auto-show
     (setq agent-ide-sidebar--user-dismissed nil)
-    (agent-ide-sidebar--show nil)))
+    (agent-ide-sidebar--show nil))))
 
 (defun agent-ide-sidebar-on-sessions-changed ()
   "Refresh or hide sidebar after session list/status changes."
