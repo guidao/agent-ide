@@ -95,6 +95,7 @@ is created.  Use `agent-ide-set-model' to switch models interactively."
 (require 'agent-ide-protocol)
 (require 'agent-ide-transcript)
 (require 'agent-ide-session)
+(require 'agent-ide-sidebar)
 
 (provide 'agent-ide)
 
