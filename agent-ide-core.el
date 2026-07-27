@@ -135,7 +135,9 @@
         (with-current-buffer buffer
           (when (fboundp 'agent-ide-renderer-refresh-placeholder)
             (agent-ide-renderer-refresh-placeholder session))
-          (force-mode-line-update t))))))
+          (force-mode-line-update t))))
+    (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+      (agent-ide-sidebar-on-sessions-changed))))
 
 (provide 'agent-ide-core)
 

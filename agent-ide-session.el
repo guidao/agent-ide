@@ -89,7 +89,9 @@ Allowed values are nil, `vertical', and `horizontal'.")
       (ignore-errors
         (acp-shutdown :client client)))
     (remhash session agent-ide--session-metadata)
-    (setq agent-ide--sessions (delq session agent-ide--sessions))))
+    (setq agent-ide--sessions (delq session agent-ide--sessions))
+    (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+      (agent-ide-sidebar-on-sessions-changed))))
 
 (defun agent-ide--handle-buffer-killed ()
   "Clean up session for the killed buffer."
@@ -128,6 +130,8 @@ Allowed values are nil, `vertical', and `horizontal'.")
           (agent-ide--make-client session))
     (agent-ide--subscribe-client session)
     (push session agent-ide--sessions)
+    (when (fboundp 'agent-ide-sidebar-on-session-created)
+      (agent-ide-sidebar-on-session-created session))
     session))
 
 (defun agent-ide--start-session (&optional directory)

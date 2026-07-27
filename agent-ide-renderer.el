@@ -1303,7 +1303,9 @@ Prefers ACP `usage_update' `size', then legacy context-window fields."
         (setq header-line-format
               (concat " " (agent-ide-renderer--header-summary session)))
         (force-mode-line-update t)
-        (agent-ide-renderer-refresh-placeholder session)))))
+        (agent-ide-renderer-refresh-placeholder session))
+      (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+        (agent-ide-sidebar-on-sessions-changed)))))
 
 (defun agent-ide-renderer-initialize-buffer (session)
   "Initialize SESSION transcript buffer."

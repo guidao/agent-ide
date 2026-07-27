@@ -90,6 +90,52 @@ PLIST may include :models :usage :buffer-name."
             (should (= (length agent-ide-sidebar--entries) 2)))))
     (agent-ide-sidebar-test--teardown)))
 
+(ert-deftest agent-ide-sidebar-quit-sets-dismissed-and-hides ()
+  "q marks dismissed and removes the side window."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
+        (setq agent-ide--sessions (list session))
+        (agent-ide-sidebar)
+        (should (get-buffer-window agent-ide-sidebar-buffer-name t))
+        (agent-ide-sidebar-quit)
+        (should agent-ide-sidebar--user-dismissed)
+        (should (null (get-buffer-window agent-ide-sidebar-buffer-name t))))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-refresh-does-not-reshow-when-dismissed ()
+  "Status refresh keeps sidebar hidden after user dismiss."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
+        (setq agent-ide--sessions (list session))
+        (agent-ide-sidebar)
+        (agent-ide-sidebar-quit)
+        (agent-ide-sidebar-on-sessions-changed)
+        (should (null (get-buffer-window agent-ide-sidebar-buffer-name t))))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-new-session-clears-dismissed ()
+  "Creating a session shows sidebar again when auto-show is on."
+  (unwind-protect
+      (let ((agent-ide-sidebar-auto-show t)
+            (session (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
+        (setq agent-ide-sidebar--user-dismissed t)
+        (setq agent-ide--sessions (list session))
+        (agent-ide-sidebar-on-session-created session)
+        (should (null agent-ide-sidebar--user-dismissed))
+        (should (get-buffer-window agent-ide-sidebar-buffer-name t)))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-hides-when-no-sessions ()
+  "Cleanup of last session hides the sidebar."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
+        (setq agent-ide--sessions (list session))
+        (agent-ide-sidebar)
+        (setq agent-ide--sessions nil)
+        (agent-ide-sidebar-on-sessions-changed)
+        (should (null (get-buffer-window agent-ide-sidebar-buffer-name t))))
+    (agent-ide-sidebar-test--teardown)))
+
 (provide 'agent-ide-sidebar-test)
 
 ;;; agent-ide-sidebar-test.el ends here

@@ -213,27 +213,65 @@ Visibility indicator uses ●/○ independently."
                             'agent-ide-session old-session)))
             (goto-char pos)))))))
 
+(defun agent-ide-sidebar--visible-p ()
+  "Return non-nil if the sidebar window is visible."
+  (get-buffer-window agent-ide-sidebar-buffer-name t))
+
+(defun agent-ide-sidebar--show (&optional select)
+  "Show sidebar side window. SELECT non-nil means select it."
+  (let ((buffer (agent-ide-sidebar--buffer)))
+    (agent-ide-sidebar-refresh)
+    (let ((window
+           (display-buffer
+            buffer
+            `((display-buffer-in-side-window)
+              (side . left)
+              (slot . -1)
+              (window-width . ,agent-ide-sidebar-width)
+              (preserve-size . (t . nil))))))
+      (when (and select window)
+        (select-window window))
+      window)))
+
+(defun agent-ide-sidebar--hide ()
+  "Hide sidebar window if present."
+  (when-let* ((window (get-buffer-window agent-ide-sidebar-buffer-name t)))
+    (quit-window nil window)))
+
+(defun agent-ide-sidebar-on-session-created (&optional _session)
+  "React to a newly created session."
+  (when agent-ide-sidebar-auto-show
+    (setq agent-ide-sidebar--user-dismissed nil)
+    (agent-ide-sidebar--show nil)))
+
+(defun agent-ide-sidebar-on-sessions-changed ()
+  "Refresh or hide sidebar after session list/status changes."
+  (agent-ide--cleanup-dead-sessions)
+  (cond
+   ((null agent-ide--sessions)
+    (agent-ide-sidebar--hide))
+   ((agent-ide-sidebar--visible-p)
+    (agent-ide-sidebar-refresh))
+   ((and agent-ide-sidebar-auto-show
+         (not agent-ide-sidebar--user-dismissed))
+    (agent-ide-sidebar--show nil))
+   (t
+    ;; Dismissed or auto-show off: refresh buffer contents only if it exists.
+    (when (get-buffer agent-ide-sidebar-buffer-name)
+      (agent-ide-sidebar-refresh)))))
+
 ;;;###autoload
 (defun agent-ide-sidebar ()
   "Show the Agent IDE sidebar and clear the user-dismissed flag."
   (interactive)
   (setq agent-ide-sidebar--user-dismissed nil)
-  (agent-ide-sidebar--buffer)
-  (agent-ide-sidebar-refresh)
-  (display-buffer
-   (agent-ide-sidebar--buffer)
-   `((display-buffer-in-side-window)
-     (side . left)
-     (slot . -1)
-     (window-width . ,agent-ide-sidebar-width)
-     (preserve-size . (t . nil)))))
+  (agent-ide-sidebar--show t))
 
 (defun agent-ide-sidebar-quit ()
   "Hide the sidebar without killing sessions."
   (interactive)
   (setq agent-ide-sidebar--user-dismissed t)
-  (when-let* ((window (get-buffer-window agent-ide-sidebar-buffer-name t)))
-    (quit-window nil window)))
+  (agent-ide-sidebar--hide))
 
 (defun agent-ide-sidebar-next ()
   "Move to the next sidebar entry."
