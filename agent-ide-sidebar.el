@@ -125,9 +125,19 @@
               ((and (numberp used) (numberp window) (> window 0))))
     (format "%d%%" (round (* 100.0 (/ (float used) window))))))
 
+(defun agent-ide-sidebar--line1-width ()
+  "Return column width for padding sidebar line 1.
+Prefer the sidebar window when visible; otherwise use 40."
+  (let ((window (or (get-buffer-window (current-buffer) t)
+                    (get-buffer-window agent-ide-sidebar-buffer-name t))))
+    (if window
+        (window-width window)
+      40)))
+
 (defun agent-ide-sidebar--format-line1 (session selected-p)
   "Return propertized first line for SESSION.
-SELECTED-P is reserved for callers; visibility uses ●/○."
+When SELECTED-P is non-nil, apply `agent-ide-sidebar-current'.
+Visibility indicator uses ●/○ independently."
   (let* ((dot (if (agent-ide-sidebar--session-visible-p session) "●" "○"))
          (project (agent-ide--directory-name
                    (agent-ide-session-directory session)))
@@ -136,7 +146,7 @@ SELECTED-P is reserved for callers; visibility uses ●/○."
          (left (concat dot " " project
                        (if index (format " <%d>" index) "")))
          (right status)
-         (width (max 20 (window-width (selected-window))))
+         (width (max 20 (agent-ide-sidebar--line1-width)))
          (pad (max 1 (- width (string-width left) (string-width right) 1)))
          (line (concat left (make-string pad ?\s) right)))
     (add-text-properties
