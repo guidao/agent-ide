@@ -6,6 +6,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'subr-x)
 (require 'agent-ide-session)
 
@@ -94,12 +95,18 @@ Rules:
    (agent-ide-enlearn--skip-next
     (setq agent-ide-enlearn--skip-next nil)
     nil)
-   ((agent-ide-enlearn--pending-for session)
-    (user-error "English coach still pending; Send, Edit, Cancel, or interrupt")
-    t)
    (t
-    (agent-ide-enlearn--begin session prompt)
-    t)))
+    (let ((pending (agent-ide-enlearn--pending-for session)))
+      (cond
+       ((plist-get pending :final)
+        (agent-ide-enlearn-send session)
+        t)
+       (pending
+        (user-error "English coach still pending; Send, Edit, Cancel, or interrupt")
+        t)
+       (t
+        (agent-ide-enlearn--begin session prompt)
+        t))))))
 
 (defun agent-ide-enlearn--begin (session prompt)
   "Freeze PROMPT and start coaching for SESSION."
@@ -114,9 +121,123 @@ Rules:
                                 (plist-get pending :mode)
                                 prompt)))
 
-(defun agent-ide-enlearn--request (_session _mode _text)
-  "Stub until Task 4. No-op."
-  nil)
+(defun agent-ide-enlearn--backend-unavailable (session)
+  "Handle missing gptel for SESSION (Task 5 expands error UI)."
+  (agent-ide-enlearn--set-pending-for session nil)
+  (agent-ide--set-status session "idle")
+  (agent-ide-renderer-update-header session)
+  (message "gptel unavailable for English coach"))
+
+(cl-defun agent-ide-enlearn--request (session mode text)
+  "Ask gptel to coach TEXT for SESSION in MODE."
+  (unless (require 'gptel nil t)
+    (agent-ide-enlearn--backend-unavailable session)
+    (cl-return-from agent-ide-enlearn--request))
+  (let* ((pending (agent-ide-enlearn--pending-for session))
+         (prompt (agent-ide-enlearn--build-user-prompt mode text))
+         (model (or agent-ide-enlearn-model
+                    (when (boundp 'gptel-model) gptel-model))))
+    (agent-ide-enlearn--set-pending-for
+     session (plist-put (or pending (list :session session)) :gptel-callback t))
+    (gptel-request
+     prompt
+     :system agent-ide-enlearn--system-prompt
+     :model model
+     :callback
+     (lambda (response _info)
+       (when (buffer-live-p (agent-ide-session-buffer session))
+         (with-current-buffer (agent-ide-session-buffer session)
+           (let ((text (cond ((stringp response) response)
+                             ((and (consp response) (stringp (car response)))
+                              (mapconcat #'identity response ""))
+                             (t ""))))
+             (if (string-empty-p (string-trim text))
+                 (progn
+                   (message "English coach: empty response")
+                   (agent-ide-enlearn--set-pending-for session nil)
+                   (agent-ide--set-status session "idle")
+                   (agent-ide-renderer-update-header session))
+               (agent-ide-enlearn--handle-response session text)))))))))
+
+(cl-defun agent-ide-enlearn--handle-response (session raw)
+  "Parse RAW gptel reply and render coach block for SESSION."
+  (let* ((parsed (agent-ide-enlearn--parse-response raw))
+         (final (plist-get parsed :final))
+         (pending (agent-ide-enlearn--pending-for session)))
+    (agent-ide--set-status session "idle")
+    (agent-ide-renderer-update-header session)
+    (unless final
+      (message "English coach: missing Final section")
+      (agent-ide-enlearn--set-pending-for session nil)
+      (cl-return-from agent-ide-enlearn--handle-response))
+    (agent-ide-enlearn--set-pending-for
+     session (plist-put (or pending (list :session session)) :final final))
+    (agent-ide-enlearn--render-coach session parsed)
+    (when agent-ide-enlearn-auto-send
+      (agent-ide-enlearn-send session))))
+
+(defun agent-ide-enlearn--render-coach (session parsed)
+  "Insert English Coach block for PARSED response into SESSION transcript."
+  (agent-ide-renderer--with-insertion-point
+   session
+   (lambda ()
+     (let ((start (point)))
+       (agent-ide-renderer--insert-read-only
+        (format "\n✦ English Coach\nFinal:\n  %s\n\nBreakdown:\n%s\n\nGrammar / collocation:\n%s\n\n"
+                (plist-get parsed :final)
+                (plist-get parsed :breakdown)
+                (plist-get parsed :grammar))
+        'face 'agent-ide-muted-face)
+       (unless agent-ide-enlearn-auto-send
+         (insert-text-button "[Send]" 'follow-link t
+                             'keymap agent-ide-action-button-map
+                             'action (lambda (_) (agent-ide-enlearn-send session)))
+         (insert "  ")
+         (insert-text-button "[Edit]" 'follow-link t
+                             'keymap agent-ide-action-button-map
+                             'action (lambda (_) (agent-ide-enlearn-edit session)))
+         (insert "  ")
+         (insert-text-button "[Cancel]" 'follow-link t
+                             'keymap agent-ide-action-button-map
+                             'action (lambda (_) (agent-ide-enlearn-cancel session)))
+         (insert "\n"))
+       (agent-ide-renderer--freeze-region start (point))))))
+
+(defun agent-ide-enlearn-send (&optional session)
+  "Deliver Final English for the pending coach turn."
+  (interactive)
+  (let* ((session (or session (agent-ide--session-for-buffer)
+                        (user-error "No Agent IDE session")))
+         (pending (agent-ide-enlearn--pending-for session))
+         (final (plist-get pending :final)))
+    (unless (and pending final)
+      (user-error "No Final English to send"))
+    (agent-ide-enlearn--set-pending-for session nil)
+    (agent-ide-deliver-prompt session final)))
+
+(defun agent-ide-enlearn-edit (&optional session)
+  "Put Final into the editable prompt; clear pending without sending."
+  (interactive)
+  (let* ((session (or session (agent-ide--session-for-buffer)
+                        (user-error "No Agent IDE session")))
+         (pending (agent-ide-enlearn--pending-for session))
+         (final (plist-get pending :final)))
+    (unless (and pending final)
+      (user-error "No Final English to edit"))
+    (agent-ide-enlearn--set-pending-for session nil)
+    (agent-ide--set-status session "idle")
+    (agent-ide-renderer-update-header session)
+    (agent-ide-renderer-replace-current-input session final)))
+
+(defun agent-ide-enlearn-cancel (&optional session)
+  "Drop pending coach turn without sending."
+  (interactive)
+  (let ((session (or session (agent-ide--session-for-buffer)
+                       (user-error "No Agent IDE session"))))
+    (agent-ide--set-status session "idle")
+    (agent-ide-renderer-update-header session)
+    (agent-ide-enlearn--set-pending-for session nil)
+    (message "English coach cancelled")))
 
 ;;;###autoload
 (define-minor-mode agent-ide-enlearn-mode
