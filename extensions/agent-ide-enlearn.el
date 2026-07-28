@@ -10,6 +10,9 @@
 (require 'subr-x)
 (require 'agent-ide-session)
 
+(declare-function agent-ide-protocol-send-prompt "agent-ide-protocol" (session prompt))
+(declare-function gptel-abort "gptel" (buf))
+
 (defgroup agent-ide-enlearn nil
   "English learning pre-submit coach for Agent IDE."
   :group 'agent-ide
@@ -145,12 +148,54 @@ Rules:
                                 prompt
                                 request-id)))
 
+(defun agent-ide-enlearn--abort-gptel-request (session)
+  "Cancel in-flight gptel coach request for SESSION when possible."
+  (when-let* ((pending (agent-ide-enlearn--pending-for session))
+              (buf (agent-ide-session-buffer session))
+              ((buffer-live-p buf)))
+    (when (require 'gptel nil t)
+      (when (fboundp 'gptel-abort)
+        (ignore-errors (gptel-abort buf))))))
+
 (defun agent-ide-enlearn--backend-unavailable (session)
-  "Handle missing gptel for SESSION (Task 5 expands error UI)."
-  (agent-ide-enlearn--invalidate-pending session)
+  "Handle missing gptel for SESSION.
+When `send-original' is configured, only ACP-send: `--begin' already froze
+the original user line, so do not call `agent-ide-deliver-prompt' again."
+  (pcase agent-ide-enlearn-on-backend-error
+    ('send-original
+     (let ((original (plist-get (agent-ide-enlearn--pending-for session) :original)))
+       (agent-ide-enlearn--invalidate-pending session)
+       (agent-ide--set-status session "idle")
+       (agent-ide-renderer-update-header session)
+       (when original
+         (agent-ide-protocol-send-prompt session original))))
+    (_
+     (agent-ide-enlearn--render-error session "gptel is not available"))))
+
+(defun agent-ide-enlearn--render-error (session message)
+  "Show coach error MESSAGE with Retry / Send original / Cancel for SESSION."
   (agent-ide--set-status session "idle")
   (agent-ide-renderer-update-header session)
-  (message "gptel unavailable for English coach"))
+  (agent-ide-renderer--with-insertion-point
+   session
+   (lambda ()
+     (let ((start (point)))
+       (agent-ide-renderer--insert-read-only
+        (format "\n✦ English Coach\nError: %s\n\n" message)
+        'face 'error)
+       (insert-text-button "[Retry]" 'follow-link t
+                           'keymap agent-ide-action-button-map
+                           'action (lambda (_) (agent-ide-enlearn-retry session)))
+       (insert "  ")
+       (insert-text-button "[Send original]" 'follow-link t
+                           'keymap agent-ide-action-button-map
+                           'action (lambda (_) (agent-ide-enlearn-send-original session)))
+       (insert "  ")
+       (insert-text-button "[Cancel]" 'follow-link t
+                           'keymap agent-ide-action-button-map
+                           'action (lambda (_) (agent-ide-enlearn-cancel session)))
+       (insert "\n")
+       (agent-ide-renderer--freeze-region start (point))))))
 
 (cl-defun agent-ide-enlearn--request (session mode text &optional request-id)
   "Ask gptel to coach TEXT for SESSION in MODE."
@@ -167,26 +212,34 @@ Rules:
     (agent-ide-enlearn--set-pending-for
      session (plist-put (or pending (list :session session))
                         :request-id request-id))
-    (gptel-request
-     prompt
-     :system agent-ide-enlearn--system-prompt
-     :model model
-     :callback
-     (lambda (response _info)
-       (when (buffer-live-p (agent-ide-session-buffer session))
-         (with-current-buffer (agent-ide-session-buffer session)
-           (when (agent-ide-enlearn--pending-request-valid-p session request-id)
-             (let ((text (cond ((stringp response) response)
-                               ((and (consp response) (stringp (car response)))
-                                (mapconcat #'identity response ""))
-                               (t ""))))
-               (if (string-empty-p (string-trim text))
-                   (progn
-                     (message "English coach: empty response")
-                     (agent-ide-enlearn--invalidate-pending session)
-                     (agent-ide--set-status session "idle")
-                     (agent-ide-renderer-update-header session))
-                 (agent-ide-enlearn--handle-response session text request-id))))))))))
+    (let ((fsm
+           (gptel-request
+            prompt
+            :system agent-ide-enlearn--system-prompt
+            :model model
+            :callback
+            (lambda (response info)
+              (when (buffer-live-p (agent-ide-session-buffer session))
+                (with-current-buffer (agent-ide-session-buffer session)
+                  (when (agent-ide-enlearn--pending-request-valid-p session request-id)
+                    (cond
+                     ((eq response 'abort) nil)
+                     ((null response)
+                      (agent-ide-enlearn--render-error
+                       session
+                       (or (plist-get info :status) "gptel request failed")))
+                     (t
+                      (let ((text (cond ((stringp response) response)
+                                        ((and (consp response) (stringp (car response)))
+                                         (mapconcat #'identity response ""))
+                                        (t ""))))
+                        (if (string-empty-p (string-trim text))
+                            (agent-ide-enlearn--render-error session "empty response")
+                          (agent-ide-enlearn--handle-response session text request-id))))))))))))
+      (when fsm
+        (agent-ide-enlearn--set-pending-for
+         session
+         (plist-put (agent-ide-enlearn--pending-for session) :gptel-fsm fsm))))))
 
 (cl-defun agent-ide-enlearn--handle-response (session raw &optional request-id)
   "Parse RAW gptel reply and render coach block for SESSION."
@@ -195,12 +248,11 @@ Rules:
   (let* ((parsed (agent-ide-enlearn--parse-response raw))
          (final (plist-get parsed :final))
          (pending (agent-ide-enlearn--pending-for session)))
+    (unless final
+      (agent-ide-enlearn--render-error session "missing Final section")
+      (cl-return-from agent-ide-enlearn--handle-response))
     (agent-ide--set-status session "idle")
     (agent-ide-renderer-update-header session)
-    (unless final
-      (message "English coach: missing Final section")
-      (agent-ide-enlearn--invalidate-pending session)
-      (cl-return-from agent-ide-enlearn--handle-response))
     (agent-ide-enlearn--set-pending-for
      session (plist-put pending :final final))
     (agent-ide-enlearn--render-coach session parsed)
@@ -260,15 +312,59 @@ Rules:
     (agent-ide-renderer-update-header session)
     (agent-ide-renderer-replace-current-input session final)))
 
+(defun agent-ide-enlearn-retry (&optional session)
+  "Retry the last failed English coach request."
+  (interactive)
+  (let* ((session (or session (agent-ide--session-for-buffer)
+                        (user-error "No Agent IDE session")))
+         (pending (agent-ide-enlearn--pending-for session))
+         (original (plist-get pending :original))
+         (mode (plist-get pending :mode))
+         (request-id (agent-ide-enlearn--next-request-id session)))
+    (unless (and pending original mode)
+      (user-error "No coach error to retry"))
+    (agent-ide-enlearn--set-pending-for
+     session (plist-put (plist-put pending :request-id request-id)
+                        :final nil))
+    (agent-ide--set-status session "coaching")
+    (agent-ide-renderer-update-header session)
+    (agent-ide-enlearn--request session mode original request-id)))
+
+(defun agent-ide-enlearn-send-original (&optional session)
+  "Send the frozen original prompt without coached Final English."
+  (interactive)
+  (let* ((session (or session (agent-ide--session-for-buffer)
+                        (user-error "No Agent IDE session")))
+         (original (plist-get (agent-ide-enlearn--pending-for session) :original)))
+    (unless original
+      (user-error "No original prompt to send"))
+    (agent-ide-enlearn--invalidate-pending session)
+    (agent-ide--set-status session "idle")
+    (agent-ide-renderer-update-header session)
+    (agent-ide-protocol-send-prompt session original)))
+
 (defun agent-ide-enlearn-cancel (&optional session)
   "Drop pending coach turn without sending."
   (interactive)
   (let ((session (or session (agent-ide--session-for-buffer)
                        (user-error "No Agent IDE session"))))
+    (agent-ide-enlearn--abort-gptel-request session)
     (agent-ide--set-status session "idle")
     (agent-ide-renderer-update-header session)
     (agent-ide-enlearn--invalidate-pending session)
     (message "English coach cancelled")))
+
+(defun agent-ide-enlearn--interrupt-advice (orig &rest args)
+  "Cancel in-flight coach gptel instead of ACP interrupt when coaching."
+  (let ((session (agent-ide--session-for-buffer)))
+    (if (and agent-ide-enlearn-mode
+             session
+             (let ((pending (agent-ide-enlearn--pending-for session)))
+               (and pending (not (plist-get pending :final)))))
+        (progn
+          (agent-ide-enlearn--abort-gptel-request session)
+          (agent-ide-enlearn-cancel session))
+      (apply orig args))))
 
 (defun agent-ide-enlearn--submit-advice (orig &rest _args)
   "Send pending Final when editable prompt is empty."
@@ -287,11 +383,13 @@ Rules:
       (progn
         (add-hook 'agent-ide-pre-submit-functions
                   #'agent-ide-enlearn--pre-submit)
-        (advice-add #'agent-ide-submit :around #'agent-ide-enlearn--submit-advice))
+        (advice-add #'agent-ide-submit :around #'agent-ide-enlearn--submit-advice)
+        (advice-add #'agent-ide-interrupt :around #'agent-ide-enlearn--interrupt-advice))
     (progn
       (remove-hook 'agent-ide-pre-submit-functions
                    #'agent-ide-enlearn--pre-submit)
-      (advice-remove #'agent-ide-submit #'agent-ide-enlearn--submit-advice))))
+      (advice-remove #'agent-ide-submit #'agent-ide-enlearn--submit-advice)
+      (advice-remove #'agent-ide-interrupt #'agent-ide-enlearn--interrupt-advice))))
 
 ;;;###autoload
 (defun agent-ide-enlearn-toggle ()
