@@ -21,10 +21,26 @@
          (parsed (agent-ide-enlearn--parse-response raw)))
     (should (equal (plist-get parsed :final) "Fix the nil check in foo.el"))
     (should (string-match-p "祈使句" (plist-get parsed :breakdown)))
-    (should (string-match-p "nil check" (plist-get parsed :grammar)))))
+    (should (string-match-p "nil check" (plist-get parsed :grammar)))
+    (should (equal (plist-get parsed :raw) raw))))
+
+(ert-deftest agent-ide-enlearn-tolerates-heading-trailing-whitespace ()
+  (should (equal (agent-ide-enlearn--section "## Final  \nFix" "Final") "Fix"))
+  (should (equal (agent-ide-enlearn--section "## Final\t\nFix" "Final") "Fix")))
+
+(ert-deftest agent-ide-enlearn-empty-final-returns-nil ()
+  (let ((parsed (agent-ide-enlearn--parse-response "## Final\n\n## Breakdown\n- foo")))
+    (should (null (plist-get parsed :final)))
+    (should (string-match-p "foo" (plist-get parsed :breakdown)))))
+
+(ert-deftest agent-ide-enlearn-whitespace-only-final-returns-nil ()
+  (let ((parsed (agent-ide-enlearn--parse-response "## Final\n   \n## Breakdown\n- foo")))
+    (should (null (plist-get parsed :final)))))
 
 (ert-deftest agent-ide-enlearn-parse-failure-returns-nil-final ()
   (let ((parsed (agent-ide-enlearn--parse-response "sorry I cannot")))
-    (should (null (plist-get parsed :final)))))
+    (should (null (plist-get parsed :final)))
+    (should (equal (plist-get parsed :breakdown) ""))
+    (should (equal (plist-get parsed :grammar) ""))))
 
 (provide 'agent-ide-enlearn-test)

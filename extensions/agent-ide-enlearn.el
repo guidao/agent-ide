@@ -6,7 +6,6 @@
 
 ;;; Code:
 
-(require 'cl-lib)
 (require 'subr-x)
 (require 'agent-ide-session)
 
@@ -41,7 +40,7 @@
   (let ((parts (split-string raw "^## " t))
         found)
     (dolist (part parts found)
-      (when (string-match-p (format "\\`%s\\(?:\n\\|\\'\\)" (regexp-quote name)) part)
-        (setq found (string-trim (substring part (length name))))))))
+      (when (string-match (format "\\`%s[ \t]*\\(?:\n\\|\\'\\)" (regexp-quote name)) part)
+        (setq found (string-trim (substring part (match-end 0))))))))
 
 (provide 'agent-ide-enlearn)
