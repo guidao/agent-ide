@@ -11,6 +11,7 @@
   (defun valign--guess-table-type (&rest _)))
 
 (require 'agent-ide-enlearn)
+(require 'agent-ide-submit-test)
 
 (ert-deftest agent-ide-enlearn-detects-chinese ()
   (should (eq (agent-ide-enlearn--mode-for-text "帮我修这个 bug") 'translate))
@@ -42,5 +43,27 @@
     (should (null (plist-get parsed :final)))
     (should (equal (plist-get parsed :breakdown) ""))
     (should (equal (plist-get parsed :grammar) ""))))
+
+(ert-deftest agent-ide-enlearn-hook-defers-when-enabled ()
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let* ((session (agent-ide-submit-test--session))
+           (sent 'unset)
+           (agent-ide-enlearn-auto-send nil))
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (agent-ide-renderer-create-prompt session)
+      (goto-char (marker-position (agent-ide-session-input-start-marker session)))
+      (insert "帮我写测试")
+      (agent-ide-enlearn-mode 1)
+      (cl-letf (((symbol-function 'agent-ide-protocol-send-prompt)
+                 (lambda (_s p) (setq sent p)))
+                ((symbol-function 'agent-ide-enlearn--request)
+                 (lambda (&rest _) nil)))
+        (agent-ide-submit)
+        (should (eq sent 'unset))
+        (should (string-match-p "帮我写测试" (buffer-string)))
+        (should (equal (agent-ide-session-status session) "coaching")))
+      (agent-ide-enlearn-mode -1))))
 
 (provide 'agent-ide-enlearn-test)
