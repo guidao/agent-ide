@@ -1575,6 +1575,22 @@ Prefers ACP `usage_update' `size', then legacy context-window fields."
             (marker-position end)))
         ""))))
 
+(defun agent-ide-renderer-replace-current-input (session text)
+  "Replace SESSION editable prompt contents with TEXT."
+  (with-current-buffer (agent-ide-session-buffer session)
+    (when (agent-ide-renderer-input-active-p session)
+      (let* ((input-start (agent-ide-session-input-start-marker session))
+             (input-end (agent-ide-session-input-end-marker session))
+             (start-pos (marker-position input-start))
+             (end-pos (marker-position input-end)))
+        (agent-ide-renderer--writable
+          (agent-ide-renderer-make-input-editable session)
+          (delete-region start-pos end-pos)
+          (insert text)
+          (set-marker input-end (point))
+          (agent-ide-renderer-style-input-region session)
+          (agent-ide-renderer-refresh-placeholder session))))))
+
 (defun agent-ide-renderer-freeze-current-input (session)
   "Freeze SESSION current input region."
   (with-current-buffer (agent-ide-session-buffer session)

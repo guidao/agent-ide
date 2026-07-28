@@ -16,6 +16,9 @@
 (require 'agent-ide-session-mode)
 (require 'agent-ide-transcript)
 
+(unless (boundp 'agent-ide-pre-submit-functions)
+  (defvar agent-ide-pre-submit-functions nil))
+
 (defvar agent-ide-command '("cursor-agent" "acp")
   "Command used to start the agent ACP backend.
 The first element is the executable and the rest are arguments.")
@@ -171,6 +174,22 @@ With prefix argument, prompt for DIRECTORY."
         (agent-ide--display-buffer (agent-ide-session-buffer session))
       (agent-ide--start-session directory))))
 
+(defun agent-ide-freeze-user-prompt (session prompt)
+  "Record PROMPT in SESSION history and freeze it as a submitted user line.
+Creates a fresh editable prompt.  Does not send to the agent."
+  (agent-ide-renderer-replace-current-input session prompt)
+  (push prompt (agent-ide-session-prompt-history session))
+  (setf (agent-ide-session-prompt-history-index session) nil)
+  (agent-ide-renderer-freeze-current-input session)
+  (agent-ide-renderer-create-prompt session t))
+
+(defun agent-ide-deliver-prompt (session prompt)
+  "Freeze PROMPT as a user line in SESSION and send it via ACP."
+  (unless (agent-ide-session-acp-session-id session)
+    (user-error "Agent session is not ready"))
+  (agent-ide-freeze-user-prompt session prompt)
+  (agent-ide-protocol-send-prompt session prompt))
+
 ;;;###autoload
 (defun agent-ide-submit ()
   "Submit the current Agent IDE prompt."
@@ -180,11 +199,9 @@ With prefix argument, prompt for DIRECTORY."
          (prompt (agent-ide-renderer-current-input session)))
     (when (string-empty-p (string-trim prompt))
       (user-error "Prompt is empty"))
-    (push prompt (agent-ide-session-prompt-history session))
-    (setf (agent-ide-session-prompt-history-index session) nil)
-    (agent-ide-renderer-freeze-current-input session)
-    (agent-ide-renderer-create-prompt session t)
-    (agent-ide-protocol-send-prompt session prompt)))
+    (unless (run-hook-with-args-until-success
+             'agent-ide-pre-submit-functions session prompt)
+      (agent-ide-deliver-prompt session prompt))))
 
 ;;;###autoload
 (defun agent-ide-interrupt ()

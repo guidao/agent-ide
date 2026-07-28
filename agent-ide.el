@@ -56,6 +56,15 @@ The first element is the executable and the rest are arguments."
   :type 'boolean
   :group 'agent-ide)
 
+(defcustom agent-ide-pre-submit-functions nil
+  "Abnormal hook run before delivering a user prompt.
+Each function is called as (FUNCTION SESSION PROMPT).
+If any function returns non-nil, it has handled the submission and
+`agent-ide-submit' must not deliver PROMPT.  If all return nil,
+PROMPT is delivered with `agent-ide-deliver-prompt'."
+  :type 'hook
+  :group 'agent-ide)
+
 (defcustom agent-ide-prompt-placeholder-text "Tell Agent what to do..."
   "Placeholder text shown in an empty idle Agent IDE prompt."
   :type 'string
