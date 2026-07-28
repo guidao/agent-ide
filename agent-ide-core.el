@@ -126,10 +126,16 @@
   "Return OBJECT as a compact JSON string."
   (json-encode object))
 
+(defun agent-ide--touch-session (session)
+  "Record that SESSION was active just now."
+  (when (agent-ide-session-p session)
+    (agent-ide--session-metadata-put session :last-active-at (float-time))))
+
 (defun agent-ide--set-status (session status)
   "Set SESSION status to STATUS."
   (when (agent-ide-session-p session)
     (setf (agent-ide-session-status session) status)
+    (agent-ide--touch-session session)
     (when-let* ((buffer (agent-ide-session-buffer session)))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer

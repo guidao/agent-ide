@@ -1802,9 +1802,14 @@ When COLLAPSED is non-nil, hide the compact block body by default."
             (setq record (plist-put record :style style))
             (setq record (plist-put record :expanded-output expanded-output))
             (setq record (plist-put record :collapsed collapsed))
+            (when (plist-get record :permission)
+              (setq record (plist-put record :pending nil)))
             (agent-ide-renderer--put-tool-record session key record))))
         (agent-ide-renderer--restore-input-point-marker restore-point)
-        (agent-ide-renderer--sync-following-window-points session))))
+        (agent-ide-renderer--sync-following-window-points session)
+        (agent-ide--touch-session session)
+        (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+          (agent-ide-sidebar-on-sessions-changed)))))
 
 (defun agent-ide-renderer-insert-permission
     (session key title body options respond-fn)
@@ -1862,9 +1867,15 @@ permission options.  RESPOND-FN receives the chosen option id."
               (agent-ide-renderer--freeze-region start (point))
               (agent-ide-renderer--put-tool-record
                session key (list :start (copy-marker start nil)
-                                 :end (copy-marker (point) nil))))))
+                                 :end (copy-marker (point) nil)
+                                 :permission t
+                                 :pending t
+                                 :title (or title "Approval"))))))
         (agent-ide-renderer--restore-input-point-marker restore-point)
-        (agent-ide-renderer--sync-following-window-points session))))
+        (agent-ide-renderer--sync-following-window-points session)
+        (agent-ide--touch-session session)
+        (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+          (agent-ide-sidebar-on-sessions-changed)))))
 
 (provide 'agent-ide-renderer)
 

@@ -66,6 +66,7 @@ Type your prompt and press `C-c C-m` (or `Return` with a configured binding) to 
 | `agent-ide-restart` | `C-c C-r` | Kill and restart the current session |
 | `agent-ide-set-model` | `C-c C-s` | Switch the agent model (completing-read) |
 | `agent-ide-yank-region` | `C-c C-y` | Insert the active region as file+line context |
+| `agent-ide-sidebar` | `C-c C-b` | Focus the session sidebar |
 
 ### Prompt keys
 
@@ -92,14 +93,13 @@ The header shows: **model name** · **project directory** · **context usage** /
 
 ### Session sidebar
 
-A left sidebar lists live sessions (status, model, usage). Open with `M-x agent-ide-sidebar`.
+A left sidebar lists live sessions. Each entry shows project/`[status]` (or `[ask]` when a permission prompt is waiting), model, and an optional third line for the active tool/approval. From a session buffer, press `C-c C-b` (or `M-x agent-ide-sidebar`) to focus it.
 
 | Key | Action |
 |---|---|
 | `RET` / mouse-1 | Display that session’s buffer via existing `agent-ide--display-buffer` |
 | `n` / `p` | Move by entry (two physical lines per entry) |
 | `k` | Kill session (confirm when `agent-ide-sidebar-confirm-kill` is non-nil) |
-| `+` / `c` | `agent-ide-new-session` |
 | `g` | Manual refresh |
 | `q` | Hide sidebar (set user-dismissed; do not kill sessions) |
 
@@ -119,7 +119,7 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-mcp-servers` | `[]` | MCP servers passed to `session/new` |
 | `agent-ide-prompt-placeholder-text` | `"Tell Agent what to do..."` | Empty-prompt placeholder |
 | `agent-ide-running-placeholder-text` | `"Working..."` | Placeholder while the agent processes |
-| `agent-ide-sidebar-width` | `0.22` | Left side-window width |
+| `agent-ide-sidebar-width` | `0.14` | Left side-window width |
 | `agent-ide-sidebar-auto-show` | `t` | Auto-show on session create; ignored for refresh while user-dismissed |
 | `agent-ide-sidebar-confirm-kill` | `t` | Confirm before kill |
 
@@ -177,7 +177,7 @@ agent-ide.el              Entry point, defcustom, require all
 ├── agent-ide-session-mode.el Major mode, keymaps, completion, edit guard
 ├── agent-ide-transcript.el   ACP event dispatch (notifications, requests)
 ├── agent-ide-session.el  User commands, lifecycle, yank-region, set-model
-└── agent-ide-sidebar.el  Session list side window, switch/kill/new
+└── agent-ide-sidebar.el  Session list side window, switch/kill
 ```
 
 ## License

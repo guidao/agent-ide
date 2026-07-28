@@ -17,11 +17,10 @@
   :group 'agent-ide
   :prefix "agent-ide-sidebar-")
 
-(defcustom agent-ide-sidebar-width 0.22
+(defcustom agent-ide-sidebar-width 0.14
   "Width of the Agent IDE sidebar side window."
   :type 'number
   :group 'agent-ide-sidebar)
-
 (defcustom agent-ide-sidebar-auto-show t
   "When non-nil, show the sidebar when a session is created."
   :type 'boolean
@@ -49,8 +48,6 @@
     (define-key map (kbd "RET") #'agent-ide-sidebar-select)
     (define-key map [mouse-1] #'agent-ide-sidebar-select)
     (define-key map (kbd "k") #'agent-ide-sidebar-kill)
-    (define-key map (kbd "+") #'agent-ide-sidebar-new-session)
-    (define-key map (kbd "c") #'agent-ide-sidebar-new-session)
     (define-key map (kbd "g") #'agent-ide-sidebar-refresh)
     (define-key map (kbd "q") #'agent-ide-sidebar-quit)
     map)
@@ -60,6 +57,7 @@
   "Major mode for the Agent IDE session sidebar."
   (setq truncate-lines t)
   (setq-local buffer-read-only t)
+  (setq-local mode-line-format nil)
   (setq-local agent-ide-sidebar--entries nil))
 
 (defun agent-ide-sidebar--buffer ()
@@ -118,55 +116,134 @@
     (and (buffer-live-p buffer)
          (get-buffer-window buffer t))))
 
-(defun agent-ide-sidebar--usage-percent (session)
-  "Return usage percent string for SESSION, or nil."
-  (when-let* ((usage (agent-ide-session-usage session))
-              (used (agent-ide-renderer--context-used usage))
-              (window (agent-ide-renderer--context-window usage))
-              ((and (numberp used) (numberp window) (> window 0))))
-    (format "%d%%" (round (* 100.0 (/ (float used) window))))))
+(defun agent-ide-sidebar--session-window ()
+  "Return the sidebar window when visible."
+  (or (get-buffer-window (current-buffer) t)
+      (get-buffer-window agent-ide-sidebar-buffer-name t)))
 
-(defun agent-ide-sidebar--line1-width ()
-  "Return column width for padding sidebar line 1.
-Prefer the sidebar window when visible; otherwise use 40."
-  (let ((window (or (get-buffer-window (current-buffer) t)
-                    (get-buffer-window agent-ide-sidebar-buffer-name t))))
-    (if window
-        (window-width window)
-      40)))
+(defun agent-ide-sidebar--line1-fits-p (line window)
+  "Return non-nil when LINE fits in WINDOW's body.
+Uses pixel widths so wide glyphs like ●/○ are measured correctly.
+Leaves a one-character margin so the final `]' is not clipped by
+window dividers / truncation glyphs."
+  (cond
+   ((and window
+         (display-graphic-p)
+         (fboundp 'string-pixel-width)
+         (> (window-body-width window t) 0))
+    (let ((margin (frame-char-width (window-frame window))))
+      (<= (string-pixel-width line)
+          (max 0 (- (window-body-width window t) margin)))))
+   (t
+    ;; Column fallback.  Tiny side-window widths in batch/TTY frames
+    ;; are unreliable, so keep a practical minimum for tests/TTY.
+    (let ((cols (if window (window-body-width window) 28)))
+      (when (< cols 12)
+        (setq cols 28))
+      (<= (string-width line) (max 1 (- cols 2)))))))
+
+(defun agent-ide-sidebar--truncate-project (project index status-text &optional dot)
+  "Truncate PROJECT so line 1 fits the sidebar width.
+INDEX is a numeric buffer index or nil.  STATUS-TEXT is like \"[idle]\".
+DOT is the visibility marker (●/○).  Ellipsis is \"..\"."
+  (let* ((window (agent-ide-sidebar--session-window))
+         (dot (or dot "●"))
+         (index-text (if index (format " <%d>" index) ""))
+         (ellipsis "..")
+         (name project)
+         (make-line (lambda (n)
+                      (concat dot " " n index-text " " status-text))))
+    (while (and (not (agent-ide-sidebar--line1-fits-p
+                      (funcall make-line name) window))
+                (> (string-width name) (string-width ellipsis)))
+      (setq name (truncate-string-to-width
+                  name
+                  (max (string-width ellipsis)
+                       (1- (string-width name)))
+                  nil nil ellipsis)))
+    (unless (agent-ide-sidebar--line1-fits-p (funcall make-line name) window)
+      (setq name ellipsis))
+    name))
+
+(defun agent-ide-sidebar--pending-permission-p (session)
+  "Return non-nil when SESSION has an unanswered permission prompt."
+  (let ((found nil))
+    (maphash
+     (lambda (_key record)
+       (when (and (plist-get record :permission)
+                  (plist-get record :pending))
+         (setq found t)))
+     (agent-ide-session-tool-calls session))
+    found))
+
+(defun agent-ide-sidebar--active-tool-title (session)
+  "Return title of SESSION's in-progress tool call, or nil."
+  (let ((active nil)
+        (best-pos -1))
+    (maphash
+     (lambda (_key record)
+       (unless (plist-get record :permission)
+         (let* ((status (downcase (or (plist-get record :status) "")))
+                (title (plist-get record :title))
+                (end (plist-get record :end))
+                (pos (and (markerp end) (marker-position end))))
+           (when (and title
+                      (member status '("pending" "in_progress" "in-progress"
+                                       "running")))
+             (when (or (null active)
+                       (and pos (> pos best-pos)))
+               (setq active title
+                     best-pos (or pos best-pos)))))))
+     (agent-ide-session-tool-calls session))
+    active))
+
+(defun agent-ide-sidebar--shorten (text max-width)
+  "Shorten TEXT to MAX-WIDTH columns with \"..\"."
+  (if (<= (string-width text) max-width)
+      text
+    (truncate-string-to-width text max-width nil nil "..")))
+
+(defun agent-ide-sidebar--display-status (session)
+  "Return sidebar status label for SESSION."
+  (if (agent-ide-sidebar--pending-permission-p session)
+      "ask"
+    (or (agent-ide-session-status session) "unknown")))
 
 (defun agent-ide-sidebar--format-line1 (session selected-p)
   "Return propertized first line for SESSION.
 When SELECTED-P is non-nil, apply `agent-ide-sidebar-current'.
-Visibility indicator uses ●/○ independently."
+Visibility indicator uses ●/○ independently.
+Long project names are truncated with \"..\" so status stays visible."
   (let* ((dot (if (agent-ide-sidebar--session-visible-p session) "●" "○"))
          (project (agent-ide--directory-name
                    (agent-ide-session-directory session)))
          (index (agent-ide-sidebar--buffer-index session))
-         (status (or (agent-ide-session-status session) "unknown"))
-         (left (concat dot " " project
-                       (if index (format " <%d>" index) "")))
-         (right status)
-         (width (max 20 (agent-ide-sidebar--line1-width)))
-         (pad (max 1 (- width (string-width left) (string-width right) 1)))
-         (line (concat left (make-string pad ?\s) right)))
+         (status (agent-ide-sidebar--display-status session))
+         (status-text (format "[%s]" status))
+         (project (agent-ide-sidebar--truncate-project
+                   project index status-text dot))
+         (prefix (concat dot " " project
+                         (if index (format " <%d>" index) "")
+                         " "))
+         (line (concat prefix status-text)))
     (add-text-properties
      0 (length line)
      (list 'agent-ide-session session
            'agent-ide-sidebar-entry t)
      line)
     (add-face-text-property
-     (- (length line) (length right)) (length line)
-     (agent-ide-sidebar--status-face status) nil line)
+     (length prefix) (length line)
+     (agent-ide-sidebar--status-face
+      (if (equal status "ask") "running" status))
+     nil line)
     (when selected-p
       (add-face-text-property 0 (length line) 'agent-ide-sidebar-current t line))
     line))
 
 (defun agent-ide-sidebar--format-line2 (session)
-  "Return propertized second line for SESSION."
+  "Return propertized second line for SESSION (model)."
   (let* ((model (or (agent-ide-renderer--model-label session) "—"))
-         (usage (or (agent-ide-sidebar--usage-percent session) "—"))
-         (text (format "  %s · %s" model usage)))
+         (text (concat "  " model)))
     (add-text-properties
      0 (length text)
      (list 'agent-ide-session session
@@ -174,14 +251,33 @@ Visibility indicator uses ●/○ independently."
      text)
     text))
 
-(defun agent-ide-sidebar--insert-new-button ()
-  "Insert the footer new-session button."
-  (insert "\n")
-  (insert-text-button
-   "[+ New]"
-   'action (lambda (_button) (agent-ide-sidebar-new-session))
-   'follow-link t
-   'help-echo "Create a new Agent IDE session"))
+(defun agent-ide-sidebar--permission-title (session)
+  "Return pending permission title for SESSION, or nil."
+  (let ((title nil))
+    (maphash
+     (lambda (_key record)
+       (when (and (null title)
+                  (plist-get record :permission)
+                  (plist-get record :pending))
+         (setq title (or (plist-get record :title) "approval"))))
+     (agent-ide-session-tool-calls session))
+    title))
+
+(defun agent-ide-sidebar--format-line3 (session)
+  "Return propertized third line for SESSION tool/approval, or nil."
+  (when-let* ((label
+               (cond
+                ((agent-ide-sidebar--pending-permission-p session)
+                 (agent-ide-sidebar--permission-title session))
+                (t (agent-ide-sidebar--active-tool-title session))))
+              (label (agent-ide-sidebar--shorten label 24))
+              (text (concat "  " label)))
+    (add-text-properties
+     0 (length text)
+     (list 'agent-ide-session session
+           'agent-ide-sidebar-entry t)
+     text)
+    text))
 
 (defun agent-ide-sidebar--session-at-point ()
   "Return session text-property at point."
@@ -201,12 +297,15 @@ Visibility indicator uses ●/○ independently."
         (erase-buffer)
         (setq agent-ide-sidebar--entries sessions)
         (dolist (session sessions)
-          (let ((selected (eq session old-session)))
+          (let ((selected (eq session old-session))
+                (line3 (agent-ide-sidebar--format-line3 session)))
             (insert (agent-ide-sidebar--format-line1 session selected))
             (insert "\n")
             (insert (agent-ide-sidebar--format-line2 session))
-            (insert "\n")))
-        (agent-ide-sidebar--insert-new-button)
+            (insert "\n")
+            (when line3
+              (insert line3)
+              (insert "\n"))))
         (goto-char (point-min))
         (when old-session
           (when-let* ((pos (text-property-any
@@ -268,10 +367,15 @@ Visibility indicator uses ●/○ independently."
 
 ;;;###autoload
 (defun agent-ide-sidebar ()
-  "Show the Agent IDE sidebar and clear the user-dismissed flag."
+  "Show or focus the Agent IDE sidebar.
+If the sidebar is already visible, select its window."
   (interactive)
   (setq agent-ide-sidebar--user-dismissed nil)
-  (agent-ide-sidebar--show t))
+  (if-let* ((window (get-buffer-window agent-ide-sidebar-buffer-name t)))
+      (progn
+        (agent-ide-sidebar-refresh)
+        (select-window window))
+    (agent-ide-sidebar--show t)))
 
 (defun agent-ide-sidebar-quit ()
   "Hide the sidebar without killing sessions."
@@ -303,6 +407,37 @@ Visibility indicator uses ●/○ independently."
                     (eq (agent-ide-sidebar--session-at-point) session)))
       (forward-line -1))))
 
+(defun agent-ide-sidebar--find-session-window ()
+  "Return a window showing an Agent IDE session buffer, or nil.
+Never returns the sidebar window."
+  (cl-loop for window in (window-list-1 nil nil t)
+           for buffer = (window-buffer window)
+           when (and (buffer-live-p buffer)
+                     (not (eq buffer (get-buffer agent-ide-sidebar-buffer-name)))
+                     (with-current-buffer buffer
+                       (derived-mode-p 'agent-ide-session-mode)))
+           return window))
+
+(defun agent-ide-sidebar--display-session (session)
+  "Show SESSION transcript.
+Prefer reusing/replacing an existing session window instead of
+opening another split."
+  (let ((buffer (agent-ide-session-buffer session)))
+    (unless (buffer-live-p buffer)
+      (user-error "Session buffer is dead"))
+    (if-let* ((existing (get-buffer-window buffer t)))
+        (progn
+          (when agent-ide-select-window-on-open
+            (select-window existing))
+          existing)
+      (if-let* ((window (agent-ide-sidebar--find-session-window)))
+          (progn
+            (set-window-buffer window buffer)
+            (when agent-ide-select-window-on-open
+              (select-window window))
+            window)
+        (agent-ide--display-buffer buffer)))))
+
 (defun agent-ide-sidebar-select ()
   "Display the session at point."
   (interactive)
@@ -310,7 +445,7 @@ Visibility indicator uses ●/○ independently."
                      (user-error "No session at point"))))
     (unless (agent-ide--session-live-p session)
       (user-error "Session is dead"))
-    (agent-ide--display-buffer (agent-ide-session-buffer session))
+    (agent-ide-sidebar--display-session session)
     (agent-ide-sidebar-refresh)))
 
 (defun agent-ide-sidebar-kill ()
@@ -331,13 +466,7 @@ Visibility indicator uses ●/○ independently."
       (when (and was-current agent-ide--sessions)
         (when-let* ((next (car agent-ide--sessions))
                     ((agent-ide--session-live-p next)))
-          (agent-ide--display-buffer (agent-ide-session-buffer next)))))))
-
-(defun agent-ide-sidebar-new-session ()
-  "Start a new Agent IDE session."
-  (interactive)
-  (setq agent-ide-sidebar--user-dismissed nil)
-  (agent-ide-new-session))
+          (agent-ide-sidebar--display-session next))))))
 
 (provide 'agent-ide-sidebar)
 

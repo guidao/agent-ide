@@ -55,23 +55,36 @@ PLIST may include :models :usage :buffer-name."
              (line (agent-ide-sidebar--format-line1 session nil)))
         (should (string-match-p "myproject" line))
         (should (string-match-p "<2>" line))
-        (should (string-match-p "running" line)))
+        (should (string-match-p "\\[running\\]" line)))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-truncates-long-project-name ()
+  "Long project names end with .. and keep bracketed status."
+  (unwind-protect
+      (cl-letf (((symbol-function 'agent-ide-sidebar--line1-fits-p)
+                 (lambda (line _window)
+                   (<= (string-width line) 18))))
+        (let* ((session (agent-ide-sidebar-test--make-session
+                         "/tmp/very-long-project-name" "idle"))
+               (line (substring-no-properties
+                      (agent-ide-sidebar--format-line1 session nil))))
+          (should (string-match-p "\\.\\." line))
+          (should (string-suffix-p "[idle]" line))
+          (should (<= (string-width line) 18))))
     (agent-ide-sidebar-test--teardown)))
 
 (ert-deftest agent-ide-sidebar-formats-meta-line ()
-  "Line 2 includes model and percent usage."
+  "Line 2 includes model."
   (unwind-protect
       (let* ((session (agent-ide-sidebar-test--make-session
                        "/tmp/myproject" "idle"
-                       :models [((id . "large") (name . "Large") (isDefault . t))]
-                       :usage '((used . 42000) (size . 100000))))
+                       :models [((id . "large") (name . "Large") (isDefault . t))]))
              (line (agent-ide-sidebar--format-line2 session)))
-        (should (string-match-p "Large" line))
-        (should (string-match-p "42%" line)))
+        (should (string-match-p "Large" line)))
     (agent-ide-sidebar-test--teardown)))
 
 (ert-deftest agent-ide-sidebar-formats-unknown-meta-as-dash ()
-  "Unknown model/usage becomes an em dash."
+  "Unknown model becomes an em dash."
   (unwind-protect
       (let* ((session (agent-ide-sidebar-test--make-session "/tmp/x" "idle"))
              (line (agent-ide-sidebar--format-line2 session)))
@@ -91,7 +104,7 @@ PLIST may include :models :usage :buffer-name."
             (should (string-match-p "b" text))
             (should (string-match-p "idle" text))
             (should (string-match-p "running" text))
-            (should (string-match-p "\\[\\+ New\\]" text))
+            (should-not (string-match-p "\\[\\+ New\\]" text))
             (should (= (length agent-ide-sidebar--entries) 2)))))
     (agent-ide-sidebar-test--teardown)))
 
@@ -174,6 +187,37 @@ PLIST may include :models :usage :buffer-name."
           (should (eq shown (agent-ide-session-buffer session)))))
     (agent-ide-sidebar-test--teardown)))
 
+(ert-deftest agent-ide-sidebar-select-replaces-existing-session-window ()
+  "RET swaps buffer in an existing session window instead of splitting."
+  (unwind-protect
+      (let* ((a (agent-ide-sidebar-test--make-session "/tmp/a" "idle"))
+             (b (agent-ide-sidebar-test--make-session "/tmp/b" "idle"))
+             (displayed nil)
+             (window nil))
+        (setq agent-ide--sessions (list b a))
+        (with-current-buffer (agent-ide-session-buffer a)
+          (agent-ide-session-mode))
+        (with-current-buffer (agent-ide-session-buffer b)
+          (agent-ide-session-mode))
+        (setq window (display-buffer (agent-ide-session-buffer a)
+                                     '(display-buffer-same-window)))
+        (agent-ide-sidebar-refresh)
+        (cl-letf (((symbol-function 'agent-ide--display-buffer)
+                   (lambda (buffer)
+                     (setq displayed buffer)
+                     nil)))
+          (with-current-buffer agent-ide-sidebar-buffer-name
+            (goto-char (point-min))
+            (unless (eq (agent-ide-sidebar--session-at-point) b)
+              (goto-char (text-property-any
+                          (point-min) (point-max)
+                          'agent-ide-session b)))
+            (agent-ide-sidebar-select))
+          (should (null displayed))
+          (should (eq (window-buffer window)
+                      (agent-ide-session-buffer b)))))
+    (agent-ide-sidebar-test--teardown)))
+
 (ert-deftest agent-ide-sidebar-kill-removes-session ()
   "k kills the session buffer and removes the entry."
   (unwind-protect
@@ -201,6 +245,45 @@ PLIST may include :models :usage :buffer-name."
           (should (string-match-p
                    "running"
                    (buffer-substring-no-properties (point-min) (point-max))))))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-line2-shows-model ()
+  "Line 2 includes model, not tool."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session
+                      "/tmp/a" "running"
+                      :models [((id . "m") (name . "Model") (isDefault . t))])))
+        (puthash "t1"
+                 (list :title "Bash" :status "in_progress")
+                 (agent-ide-session-tool-calls session))
+        (let ((line (substring-no-properties
+                     (agent-ide-sidebar--format-line2 session))))
+          (should (string-match-p "Model" line))
+          (should-not (string-match-p "Bash" line))))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-line3-shows-active-tool ()
+  "Line 3 shows the in-progress tool title."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "running")))
+        (puthash "t1"
+                 (list :title "Bash" :status "in_progress")
+                 (agent-ide-session-tool-calls session))
+        (let ((line (substring-no-properties
+                     (agent-ide-sidebar--format-line3 session))))
+          (should (string-match-p "Bash" line))))
+    (agent-ide-sidebar-test--teardown)))
+
+(ert-deftest agent-ide-sidebar-shows-ask-when-permission-pending ()
+  "Pending permission replaces status with [ask]."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "running")))
+        (puthash "permission-1"
+                 (list :permission t :pending t :title "Shell")
+                 (agent-ide-session-tool-calls session))
+        (let ((line (substring-no-properties
+                     (agent-ide-sidebar--format-line1 session nil))))
+          (should (string-match-p "\\[ask\\]" line))))
     (agent-ide-sidebar-test--teardown)))
 
 (provide 'agent-ide-sidebar-test)

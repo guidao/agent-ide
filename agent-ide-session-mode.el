@@ -28,6 +28,7 @@
 (declare-function agent-ide-restart "agent-ide-session" ())
 (declare-function agent-ide-set-model "agent-ide-session" (model-id))
 (declare-function agent-ide-yank-region "agent-ide-session" ())
+(declare-function agent-ide-sidebar "agent-ide-sidebar" ())
 
 (defvar agent-ide-session-mode-map
   (let ((map (make-sparse-keymap)))
@@ -39,6 +40,7 @@
     (define-key map (kbd "C-c C-y") #'agent-ide-yank-region)
     (define-key map (kbd "C-c C-m") #'agent-ide-submit)
     (define-key map (kbd "C-c C-s") #'agent-ide-set-model)
+    (define-key map (kbd "C-c C-b") #'agent-ide-sidebar)
     map)
   "Keymap for `agent-ide-session-mode'.")
 
