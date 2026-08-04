@@ -154,20 +154,6 @@ Opens each session in a right-side window at 42% width.
          (args . ["-y" "@modelcontextprotocol/server-filesystem" "/tmp"]))])
 ```
 
-### Optional: English Coach (`agent-ide-enlearn`)
-
-Translate Chinese prompts (or polish English) via gptel, show an in-transcript
-explanation, then send Final English to the agent.
-
-```elisp
-(add-to-list 'load-path "~/.emacs.d/agent-ide/extensions")
-(require 'agent-ide-enlearn)
-(agent-ide-enlearn-mode 1)
-;; (setq agent-ide-enlearn-auto-send t)
-```
-
-Requires [gptel](https://github.com/karthink/gptel). Uses `agent-ide-pre-submit-functions`.
-
 ## Development
 
 **agent-ide** includes built-in hot-reload support for hacking on the package itself:
@@ -196,7 +182,7 @@ agent-ide.el              Entry point, defcustom, require all
 
 Plugins may register on `agent-ide-pre-submit-functions` to defer submission
 (SESSION PROMPT); return non-nil to handle the prompt and call
-`agent-ide-deliver-prompt` later. See `extensions/agent-ide-enlearn.el`.
+`agent-ide-deliver-prompt` later.
 
 ## License
 
