@@ -21,7 +21,7 @@
   "Width of the Agent IDE sidebar side window."
   :type 'number
   :group 'agent-ide-sidebar)
-(defcustom agent-ide-sidebar-auto-show t
+(defcustom agent-ide-sidebar-auto-show nil
   "When non-nil, show the sidebar when a session is created."
   :type 'boolean
   :group 'agent-ide-sidebar)

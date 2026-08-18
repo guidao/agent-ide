@@ -131,6 +131,15 @@ PLIST may include :models :usage :buffer-name."
         (should (null (get-buffer-window agent-ide-sidebar-buffer-name t))))
     (agent-ide-sidebar-test--teardown)))
 
+(ert-deftest agent-ide-sidebar-new-session-stays-hidden-by-default ()
+  "Creating a session leaves the sidebar hidden by default."
+  (unwind-protect
+      (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
+        (setq agent-ide--sessions (list session))
+        (agent-ide-sidebar-on-session-created session)
+        (should (null (get-buffer-window agent-ide-sidebar-buffer-name t))))
+    (agent-ide-sidebar-test--teardown)))
+
 (ert-deftest agent-ide-sidebar-new-session-clears-dismissed ()
   "Creating a session shows sidebar again when auto-show is on."
   (unwind-protect

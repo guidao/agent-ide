@@ -120,7 +120,7 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-prompt-placeholder-text` | `"Tell Agent what to do..."` | Empty-prompt placeholder |
 | `agent-ide-running-placeholder-text` | `"Working..."` | Placeholder while the agent processes |
 | `agent-ide-sidebar-width` | `0.14` | Left side-window width |
-| `agent-ide-sidebar-auto-show` | `t` | Auto-show on session create; ignored for refresh while user-dismissed |
+| `agent-ide-sidebar-auto-show` | `nil` | Auto-show on session create when enabled; ignored for refresh while user-dismissed |
 | `agent-ide-sidebar-confirm-kill` | `t` | Confirm before kill |
 
 ### Example: Right-side panel
