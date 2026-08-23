@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'format-spec)
 (require 'subr-x)
 (require 'agent-ide-core)
 (require 'agent-ide-protocol)
