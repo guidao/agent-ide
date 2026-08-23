@@ -66,9 +66,9 @@ region → M-x agent-ide-inline-rewrite → instruction (read-string)
 - Before the first chunk arrives, display shows "(Working…)".
 - Any external buffer modification while a preview is active cancels the
   preview (accept itself is exempt via a flag). Buffer kill cleans up.
-- Accept: `atomic-change-group` delete-region + insert final text, point at
-  end of inserted text, preview torn down. Reject: overlay removed, hooks
-  unregistered, buffer untouched.
+- Accept: `undo-boundary` + delete-region + insert + `undo-boundary` (a
+  single undo step), point at end of inserted text, preview torn down.
+  Reject: overlay removed, hooks unregistered, buffer untouched.
 - Turn-end finalization: strip leading/trailing markdown fences and trim;
   empty response → cancel preview with a message.
 

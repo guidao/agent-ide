@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'agent-ide-session)
+(require 'agent-ide-inline)
 
 (defun agent-ide-inline-test--session ()
   (agent-ide--make-session
@@ -69,3 +70,107 @@
         (agent-ide-protocol-send-prompt session "test"))
       (should (eq (car seen) session))
       (should (equal (map-elt (cadr seen) 'message) "boom")))))
+
+(ert-deftest agent-ide-inline-strip-fences-removes-surrounding-fence ()
+  (should (equal (agent-ide-inline--strip-fences "```python\nx = 1\n```")
+                 "x = 1")))
+
+(ert-deftest agent-ide-inline-strip-fences-leaves-plain-text ()
+  (should (equal (agent-ide-inline--strip-fences "  plain text  ")
+                 "plain text")))
+
+(ert-deftest agent-ide-inline-build-prompt-fills-template-slots ()
+  (let ((agent-ide-inline-prompt-template "%i\n\n%c"))
+    (should (equal (agent-ide-inline--build-prompt "fix it" "ctx block")
+                   "fix it\n\nctx block"))))
+
+(ert-deftest agent-ide-inline-build-prompt-default-has-constraint ()
+  (let ((prompt (agent-ide-inline--build-prompt "i" "c")))
+    (should (string-match-p "Do not use tools" prompt))
+    (should (string-match-p "replacement text" prompt))))
+
+(ert-deftest agent-ide-inline-resolve-returns-matching-session ()
+  (let* ((dir (file-truename default-directory))
+         (s1 (agent-ide-inline-test--session))
+         (s2 (agent-ide-inline-test--session)))
+    (setf (agent-ide-session-directory s1) (file-truename "/somewhere/else")
+          (agent-ide-session-directory s2) dir)
+    (cl-letf (((symbol-function 'agent-ide--working-directory)
+               (lambda () default-directory))
+              ((symbol-function 'agent-ide--start-session)
+               (lambda (&optional _d) (error "should not start")))
+              (agent-ide--sessions (list s1 s2)))
+      (should (eq (agent-ide-inline--resolve-session) s2)))))
+
+(ert-deftest agent-ide-inline-resolve-starts-new-session-when-no-match ()
+  (let ((started nil))
+    (cl-letf (((symbol-function 'agent-ide--working-directory)
+               (lambda () "/proj/"))
+              ((symbol-function 'agent-ide--start-session)
+               (lambda (&optional d) (setq started d) 'new-session))
+              (agent-ide--sessions nil))
+      (should (eq (agent-ide-inline--resolve-session) 'new-session))
+      (should (equal started "/proj/")))))
+
+(ert-deftest agent-ide-inline-accept-replaces-region-and-is-undoable ()
+  (with-temp-buffer
+    (setq buffer-undo-list nil)
+    (insert "hello world")
+    (let* ((session (agent-ide-inline-test--session))
+           (state (agent-ide-inline--preview-start
+                   session (current-buffer) 1 6 "rewrite")))
+      (agent-ide-inline--preview-update state "goodbye")
+      (should (equal (buffer-string) "hello world"))
+      (agent-ide-inline-accept)
+      (should (equal (buffer-string) "goodbye world"))
+      (undo)
+      (should (equal (buffer-string) "hello world"))
+      (should-not agent-ide-inline-preview-mode)
+      (should-not (alist-get session agent-ide-inline--previews)))))
+
+(ert-deftest agent-ide-inline-reject-leaves-buffer-unchanged ()
+  (with-temp-buffer
+    (insert "hello world")
+    (let* ((session (agent-ide-inline-test--session))
+           (state (agent-ide-inline--preview-start
+                   session (current-buffer) 1 6 "rewrite")))
+      (agent-ide-inline--preview-update state "goodbye")
+      (agent-ide-inline-reject)
+      (should (equal (buffer-string) "hello world"))
+      (should-not agent-ide-inline-preview-mode)
+      (should-not (alist-get session agent-ide-inline--previews)))))
+
+(ert-deftest agent-ide-inline-external-edit-cancels-preview ()
+  (with-temp-buffer
+    (insert "hello world")
+    (let* ((session (agent-ide-inline-test--session))
+           (_state (agent-ide-inline--preview-start
+                    session (current-buffer) 1 6 "rewrite")))
+      (goto-char (point-max))
+      (insert "!")
+      (should-not (alist-get session agent-ide-inline--previews))
+      (should-not agent-ide-inline-preview-mode))))
+
+(ert-deftest agent-ide-inline-chunks-accumulate-into-overlay ()
+  (with-temp-buffer
+    (insert "hello world")
+    (let* ((session (agent-ide-inline-test--session))
+           (state (agent-ide-inline--preview-start
+                   session (current-buffer) 1 6 "rewrite")))
+      (agent-ide-inline--on-chunk session "goo")
+      (agent-ide-inline--on-chunk session "dbye")
+      (should (equal (plist-get state :text) "goodbye"))
+      (should (equal (overlay-get (plist-get state :overlay) 'display)
+                     (propertize "goodbye"
+                                 'face 'agent-ide-inline-preview-face))))))
+
+(ert-deftest agent-ide-inline-response-finalizes-and-strips-fences ()
+  (with-temp-buffer
+    (insert "hello world")
+    (let* ((session (agent-ide-inline-test--session))
+           (state (agent-ide-inline--preview-start
+                   session (current-buffer) 1 6 "rewrite")))
+      (agent-ide-inline--on-chunk session "```\nbye")
+      (agent-ide-inline--on-response session nil)
+      (should (plist-get state :done))
+      (should (equal (plist-get state :text) "bye")))))
