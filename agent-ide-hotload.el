@@ -134,13 +134,13 @@ Rebuilds the entire project state without restarting Emacs."
   (interactive)
   (agent-ide-hotload--setup-keybinding)
   ;; Add to existing sessions
-  (when (and (fboundp 'agent-ide--sessions)
-               (fboundp 'agent-ide-session-buffer))
+  (when (and (boundp 'agent-ide--sessions)
+             (fboundp 'agent-ide-session-buffer))
     (dolist (session (agent-ide--sessions))
       (let ((buffer (agent-ide-session-buffer session)))
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
-            (local-set-key (kbd "C-c C-l") #'agent-ide-load-file))))))
+            (local-set-key (kbd "C-c C-l") #'agent-ide-load-file)))))))
 
 (provide 'agent-ide-hotload)
 
