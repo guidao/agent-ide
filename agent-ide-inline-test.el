@@ -296,6 +296,29 @@
       (should aligned)
       (agent-ide-inline-clear-response-overlay ov))))
 
+(ert-deftest agent-ide-inline-response-overlay-create-enables-actions-mode ()
+  "Creating a viewport enables the keyboard actions mode immediately."
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (should agent-ide-inline--response-overlay-mode)
+      (agent-ide-inline-clear-response-overlay ov))))
+
+(ert-deftest agent-ide-inline-response-overlay-at-point-searches-window ()
+  "Actions find the viewport anywhere in the visible window."
+  (with-temp-buffer
+    (insert "line one\nline two\nline three\n")
+    (goto-char 2)
+    (set-window-buffer (selected-window) (current-buffer))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) 4)))
+      (should (eq (agent-ide-inline--response-overlay-at-point) ov))
+      (agent-ide-inline-clear-response-overlay ov))))
+
 (ert-deftest agent-ide-inline-response-overlay-streams-chunks ()
   (with-temp-buffer
     (insert "origin text\n")

@@ -413,6 +413,8 @@ the reference context (region, line, defun, window, buffer)."
     (overlay-put ov 'agent-ide-inline-scroll-index 0)
     (setf (alist-get session agent-ide-inline--overlays) ov)
     (agent-ide-inline--response-overlay-render ov)
+    (agent-ide-inline--setup-response-overlay-keymap ov)
+    (agent-ide-inline--response-overlay-mode 1)
     ov))
 
 (defun agent-ide-inline--response-overlay-append-chunk (ov chunk)
@@ -523,13 +525,21 @@ the reference context (region, line, defun, window, buffer)."
     (agent-ide-inline--response-overlay-render ov)))
 
 (defun agent-ide-inline--response-overlay-at-point ()
-  "Return the inline response overlay relevant to point, or nil."
-  (let ((pos (if (consp last-input-event)
-                 (posn-point (event-start last-input-event))
-               (point))))
-    (cl-find-if (lambda (ov) (overlay-get ov 'agent-ide-inline))
-                (overlays-in (max (point-min) (1- (or pos (point))))
-                             (min (point-max) (1+ (or pos (point))))))))
+  "Return the inline response overlay visible in the selected window.
+Searches the visible window range, so actions work anywhere while the
+viewport is on screen."
+  (let* ((is-mouse-event (consp last-input-event))
+         (win (if is-mouse-event
+                  (posn-window (event-start last-input-event))
+                (selected-window)))
+         (pos (if is-mouse-event
+                  (posn-point (event-start last-input-event))
+                (point))))
+    (when (and win pos)
+      (with-selected-window win
+        (cl-find-if (lambda (ov) (overlay-get ov 'agent-ide-inline))
+                    (nconc (overlays-in pos (window-end))
+                           (overlays-in (1- (window-start)) pos)))))))
 
 (define-minor-mode agent-ide-inline--response-overlay-mode
   "Minor mode enabling keyboard actions on inline response overlays."
