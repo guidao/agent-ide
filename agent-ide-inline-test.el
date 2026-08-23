@@ -13,6 +13,8 @@
    :prompt-history nil
    :acp-session-id "test-session"))
 
+;;; Extension hook wiring (transcript + protocol)
+
 (ert-deftest agent-ide-inline-chunk-hook-fires ()
   "Transcript handler runs `agent-ide-message-chunk-functions' with text."
   (let* ((session (agent-ide-inline-test--session))
@@ -71,23 +73,7 @@
       (should (eq (car seen) session))
       (should (equal (map-elt (cadr seen) 'message) "boom")))))
 
-(ert-deftest agent-ide-inline-strip-fences-removes-surrounding-fence ()
-  (should (equal (agent-ide-inline--strip-fences "```python\nx = 1\n```")
-                 "x = 1")))
-
-(ert-deftest agent-ide-inline-strip-fences-leaves-plain-text ()
-  (should (equal (agent-ide-inline--strip-fences "  plain text  ")
-                 "plain text")))
-
-(ert-deftest agent-ide-inline-build-prompt-fills-template-slots ()
-  (let ((agent-ide-inline-prompt-template "%i\n\n%c"))
-    (should (equal (agent-ide-inline--build-prompt "fix it" "ctx block")
-                   "fix it\n\nctx block"))))
-
-(ert-deftest agent-ide-inline-build-prompt-default-has-constraint ()
-  (let ((prompt (agent-ide-inline--build-prompt "i" "c")))
-    (should (string-match-p "Do not use tools" prompt))
-    (should (string-match-p "replacement text" prompt))))
+;;; Session resolution and readiness
 
 (ert-deftest agent-ide-inline-resolve-returns-matching-session ()
   (let* ((dir (file-truename default-directory))
@@ -111,69 +97,6 @@
               (agent-ide--sessions nil))
       (should (eq (agent-ide-inline--resolve-session) 'new-session))
       (should (equal started "/proj/")))))
-
-(ert-deftest agent-ide-inline-accept-replaces-region-and-is-undoable ()
-  (with-temp-buffer
-    (setq buffer-undo-list nil)
-    (insert "hello world")
-    (let* ((session (agent-ide-inline-test--session))
-           (state (agent-ide-inline--preview-start
-                   session (current-buffer) 1 6 "rewrite")))
-      (agent-ide-inline--preview-update state "goodbye")
-      (should (equal (buffer-string) "hello world"))
-      (agent-ide-inline-accept)
-      (should (equal (buffer-string) "goodbye world"))
-      (undo)
-      (should (equal (buffer-string) "hello world"))
-      (should-not agent-ide-inline-preview-mode)
-      (should-not (alist-get session agent-ide-inline--previews)))))
-
-(ert-deftest agent-ide-inline-reject-leaves-buffer-unchanged ()
-  (with-temp-buffer
-    (insert "hello world")
-    (let* ((session (agent-ide-inline-test--session))
-           (state (agent-ide-inline--preview-start
-                   session (current-buffer) 1 6 "rewrite")))
-      (agent-ide-inline--preview-update state "goodbye")
-      (agent-ide-inline-reject)
-      (should (equal (buffer-string) "hello world"))
-      (should-not agent-ide-inline-preview-mode)
-      (should-not (alist-get session agent-ide-inline--previews)))))
-
-(ert-deftest agent-ide-inline-external-edit-cancels-preview ()
-  (with-temp-buffer
-    (insert "hello world")
-    (let* ((session (agent-ide-inline-test--session))
-           (_state (agent-ide-inline--preview-start
-                    session (current-buffer) 1 6 "rewrite")))
-      (goto-char (point-max))
-      (insert "!")
-      (should-not (alist-get session agent-ide-inline--previews))
-      (should-not agent-ide-inline-preview-mode))))
-
-(ert-deftest agent-ide-inline-chunks-accumulate-into-overlay ()
-  (with-temp-buffer
-    (insert "hello world")
-    (let* ((session (agent-ide-inline-test--session))
-           (state (agent-ide-inline--preview-start
-                   session (current-buffer) 1 6 "rewrite")))
-      (agent-ide-inline--on-chunk session "goo")
-      (agent-ide-inline--on-chunk session "dbye")
-      (should (equal (plist-get state :text) "goodbye"))
-      (should (equal (overlay-get (plist-get state :overlay) 'display)
-                     (propertize "goodbye"
-                                 'face 'agent-ide-inline-preview-face))))))
-
-(ert-deftest agent-ide-inline-response-finalizes-and-strips-fences ()
-  (with-temp-buffer
-    (insert "hello world")
-    (let* ((session (agent-ide-inline-test--session))
-           (state (agent-ide-inline--preview-start
-                   session (current-buffer) 1 6 "rewrite")))
-      (agent-ide-inline--on-chunk session "```\nbye")
-      (agent-ide-inline--on-response session nil)
-      (should (plist-get state :done))
-      (should (equal (plist-get state :text) "bye")))))
 
 (ert-deftest agent-ide-inline-ready-p-detects-ready-session ()
   (let ((session (agent-ide-inline-test--session)))
@@ -208,38 +131,242 @@
     (should-not sent)
     (should (eq (car timer) #'agent-ide-inline--send-when-ready))))
 
-(ert-deftest agent-ide-inline-rewrite-sends-prompt-and-starts-preview ()
+;;; Reference cycling
+
+(ert-deftest agent-ide-inline-reference-region-bounds ()
+  (with-temp-buffer
+    (transient-mark-mode 1)
+    (insert "hello world")
+    (push-mark (point-min) t t)
+    (goto-char 6)
+    (let* ((origin (copy-marker 1))
+           (bounds (agent-ide-inline--reference-bounds origin 'region)))
+      (should (equal bounds (cons 1 6)))
+      (set-marker origin nil))))
+
+(ert-deftest agent-ide-inline-reference-line-bounds ()
+  (with-temp-buffer
+    (insert "line one\nline two\nline three\n")
+    (let* ((origin (copy-marker 12)) ; inside line two
+           (bounds (agent-ide-inline--reference-bounds origin 'line)))
+      (should (equal bounds (cons 10 18)))
+      (set-marker origin nil))))
+
+(ert-deftest agent-ide-inline-reference-none-bounds ()
+  (with-temp-buffer
+    (insert "hello")
+    (let ((origin (copy-marker 1)))
+      (should-not (agent-ide-inline--reference-bounds origin 'none))
+      (set-marker origin nil))))
+
+(ert-deftest agent-ide-inline-reference-types-match-mode ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (should (memq 'defun (agent-ide-inline--reference-types)))
+    (should (memq 'window (agent-ide-inline--reference-types)))))
+
+(ert-deftest agent-ide-inline-reference-text-fences-content ()
   (with-temp-buffer
     (insert "hello world")
+    (let ((ov (make-overlay 1 6)))
+      (let ((text (agent-ide-inline--reference-text ov)))
+        (should (string-match-p "hello" text))
+        (should (string-match-p "```" text))
+        (should (string-match-p "In buffer" text))
+        (should (string-match-p "lines 1-1" text)))
+      (delete-overlay ov))))
+
+;;; Prompt window
+
+(ert-deftest agent-ide-inline-opens-prompt-buffer-with-session ()
+  (with-temp-buffer
+    (insert "origin buffer")
+    (let* ((session (agent-ide-inline-test--session))
+           (displayed nil)
+           (agent-ide-inline--origin (copy-marker (point-min))))
+      (cl-letf (((symbol-function 'agent-ide-inline--resolve-session)
+                 (lambda () session))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf _action) (setq displayed buf))))
+        (agent-ide-inline))
+      (should (buffer-live-p displayed))
+      (with-current-buffer displayed
+        (should (eq major-mode 'agent-ide-inline-prompt-mode))
+        (should (eq agent-ide-inline--session session))
+        (should (string-match-p "Send" (or header-line-format ""))))
+      (kill-buffer displayed))))
+
+(ert-deftest agent-ide-inline-send-sends-prompt-and-creates-overlay ()
+  (with-temp-buffer
+    (insert "origin buffer")
     (let* ((session (agent-ide-inline-test--session))
            (sent nil)
-           (status-line nil))
+           (origin (copy-marker 1 t)))
       (setf (agent-ide-session-status session) "idle")
-      (cl-letf (((symbol-function 'agent-ide-inline--resolve-session)
-                 (lambda () session))
-                ((symbol-function 'agent-ide-protocol-send-prompt)
-                 (lambda (s p) (setq sent (list s p))))
-                ((symbol-function 'agent-ide-renderer-append-status)
-                 (lambda (_s text) (setq status-line text))))
-        (agent-ide-inline-rewrite 1 6 "rewrite it"))
-      (should (equal (car sent) session))
-      (should (string-match-p "rewrite it" (cadr sent)))
-      (should (string-match-p "Do not use tools" (cadr sent)))
-      (should (string-match-p "hello" (cadr sent)))
-      (should (string-match-p "Inline" status-line))
-      (should agent-ide-inline-preview-mode)
-      (should (alist-get session agent-ide-inline--previews))
-      (should (equal (buffer-string) "hello world")))))
+      (with-temp-buffer
+        (agent-ide-inline-prompt-mode)
+        (setq-local agent-ide-inline--session session)
+        (setq-local agent-ide-inline--origin origin)
+        (setq-local agent-ide-inline--reference-ov nil)
+        (insert "explain this")
+        (let ((prompt-buf (current-buffer)))
+          (cl-letf (((symbol-function 'agent-ide-protocol-send-prompt)
+                     (lambda (s p) (setq sent (list s p))))
+                    ((symbol-function 'agent-ide-renderer-append-status)
+                     (lambda (_s _text) nil)))
+            (agent-ide-inline-send))
+          (should (equal (car sent) session))
+          (should (string-match-p "explain this" (cadr sent)))
+          (should (alist-get session agent-ide-inline--overlays))
+          (should-not (buffer-live-p prompt-buf))) ; prompt window closed
+        (should (alist-get session agent-ide-inline--overlays))))))
 
-(ert-deftest agent-ide-inline-rewrite-errors-when-busy ()
+(ert-deftest agent-ide-inline-send-errors-when-busy ()
   (with-temp-buffer
-    (insert "hello world")
+    (agent-ide-inline-prompt-mode)
     (let* ((session (agent-ide-inline-test--session)))
       (setf (agent-ide-session-status session) "running")
-      (cl-letf (((symbol-function 'agent-ide-inline--resolve-session)
-                 (lambda () session))
-                ((symbol-function 'agent-ide-protocol-send-prompt)
+      (setq-local agent-ide-inline--session session)
+      (setq-local agent-ide-inline--origin (copy-marker 1 t))
+      (setq-local agent-ide-inline--reference-ov nil)
+      (insert "explain this")
+      (cl-letf (((symbol-function 'agent-ide-protocol-send-prompt)
                  (lambda (_s _p) (error "must not send"))))
-        (should-error (agent-ide-inline-rewrite 1 6 "rewrite it")
-                      :type 'user-error)
-        (should-not agent-ide-inline-preview-mode)))))
+        (should-error (agent-ide-inline-send) :type 'user-error)))))
+
+;;; Response overlay viewport
+
+(ert-deftest agent-ide-inline-response-overlay-streams-chunks ()
+  (with-temp-buffer
+    (insert "origin text\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (agent-ide-inline--on-chunk session "hello ")
+      (agent-ide-inline--on-chunk session "world")
+      (let* ((plist (overlay-get ov 'agent-ide-inline))
+             (src (plist-get plist :src)))
+        (should (buffer-live-p src))
+        (with-current-buffer src
+          (should (equal (buffer-string) "hello world"))))
+      (should (string-match-p "hello world"
+                              (or (overlay-get ov 'after-string) "")))
+      (agent-ide-inline-clear-response-overlay ov)
+      (should-not (alist-get session agent-ide-inline--overlays)))))
+
+(ert-deftest agent-ide-inline-response-overlay-scroll-index-clamps ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (agent-ide-inline--on-chunk session (make-string 30 ?x))
+      (agent-ide-inline--response-overlay-set-scroll-index ov 99)
+      (should (<= (overlay-get ov 'agent-ide-inline-scroll-index)
+                  (- 30 (agent-ide-inline--response-overlay-height ov))))
+      (agent-ide-inline--response-overlay-set-scroll-index ov -5)
+      (should (= (overlay-get ov 'agent-ide-inline-scroll-index) 0))
+      (agent-ide-inline-clear-response-overlay ov))))
+
+(ert-deftest agent-ide-inline-response-overlay-resize-changes-height ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point)))
+           (before (overlay-get ov 'agent-ide-inline-height)))
+      (agent-ide-inline--response-overlay-resize ov 3)
+      (should (= (overlay-get ov 'agent-ide-inline-height) (+ before 3)))
+      (agent-ide-inline--response-overlay-resize ov 'reset)
+      (should (= (overlay-get ov 'agent-ide-inline-height)
+                 (agent-ide-inline--response-overlay-height ov)))
+      (agent-ide-inline-clear-response-overlay ov))))
+
+(ert-deftest agent-ide-inline-response-copy-kills-full-text ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point)))
+           (killed nil))
+      (agent-ide-inline--on-chunk session "full response")
+      (cl-letf (((symbol-function 'kill-new)
+                 (lambda (text) (setq killed text))))
+        (agent-ide-inline--response-copy ov))
+      (should (equal killed "full response"))
+      (agent-ide-inline-clear-response-overlay ov))))
+
+(ert-deftest agent-ide-inline-response-clear-removes-overlay-and-src ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point)))
+           (src (plist-get (overlay-get ov 'agent-ide-inline) :src)))
+      (agent-ide-inline--on-chunk session "text")
+      (agent-ide-inline-clear-response-overlay ov)
+      (should-not (overlay-buffer ov))
+      (should-not (buffer-live-p src))
+      (should-not (alist-get session agent-ide-inline--overlays)))))
+
+(ert-deftest agent-ide-inline-response-dispatch-clear-choice ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (agent-ide-inline--on-chunk session "text")
+      (cl-letf (((symbol-function 'read-multiple-choice)
+                 (lambda (_prompt _choices) '(?c "clear"))))
+        (agent-ide-inline--response-overlay-dispatch ov))
+      (should-not (overlay-buffer ov))
+      (should-not (alist-get session agent-ide-inline--overlays)))))
+
+(ert-deftest agent-ide-inline-response-dispatch-visit-choice ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (visited nil)
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (cl-letf (((symbol-function 'read-multiple-choice)
+                 (lambda (_prompt _choices) '(?v "visit")))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf _action) (setq visited buf))))
+        (agent-ide-inline--response-overlay-dispatch ov))
+      (should (eq visited (agent-ide-session-buffer session)))
+      (should (alist-get session agent-ide-inline--overlays)))))
+
+;;; Turn-end finalization
+
+(ert-deftest agent-ide-inline-response-marks-done ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (agent-ide-inline--on-chunk session "final answer")
+      (agent-ide-inline--on-response session nil)
+      (should (plist-get (overlay-get ov 'agent-ide-inline) :done))
+      (agent-ide-inline-clear-response-overlay ov))))
+
+(ert-deftest agent-ide-inline-failure-sets-header ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (agent-ide-inline--on-failure session '((message . "boom")))
+      (let ((plist (overlay-get ov 'agent-ide-inline)))
+        (should (string-match-p "boom"
+                                (or (plist-get plist :header) ""))))
+      (agent-ide-inline-clear-response-overlay ov))))

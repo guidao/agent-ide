@@ -1,50 +1,53 @@
-;;; agent-ide-inline.el --- In-place region editing with agent-ide -*- lexical-binding: t; -*-
+;;; agent-ide-inline.el --- Persistent agent session that follows you around -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; gptel-inline-style in-place rewrites backed by an agent-ide session.
-;; Select a region, run `agent-ide-inline-rewrite', give an instruction,
-;; watch the proposed replacement stream into an overlay, then accept
-;; (C-c C-c) or reject (C-c C-k).
+;; gptel-inline-style interaction backed by an agent-ide session.
+;; `agent-ide-inline' opens a small prompt window in the current buffer's
+;; window; the project's persistent agent session runs in the background
+;; (its transcript buffer keeps the full conversation).  Responses stream
+;; into an overlay viewport at point in the buffer where you invoked the
+;; command.  Selected text or surrounding context can be injected as
+;; reference material by cycling with C-c SPC.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'format-spec)
 (require 'subr-x)
+(require 'thingatpt)
 (require 'agent-ide-core)
 (require 'agent-ide-protocol)
 (require 'agent-ide-renderer)
 (require 'agent-ide-session)
 
 (defgroup agent-ide-inline nil
-  "In-place agent rewrites in any buffer."
+  "Inline prompts and responses backed by an agent-ide session."
   :group 'agent-ide
   :prefix "agent-ide-inline-")
 
-(defface agent-ide-inline-preview-face
-  '((t :inherit font-lock-comment-face :slant italic))
-  "Face for the proposed inline replacement text.")
-
-(defcustom agent-ide-inline-accept-key "C-c C-c"
-  "Key sequence to accept the inline preview."
-  :type 'key-sequence
+(defcustom agent-ide-inline-buffer-display-action
+  '((display-buffer-below-selected)
+    (window-height . 0.33)
+    (dedicated . t))
+  "Display action used to show the inline prompt buffer.
+See `display-buffer' for details."
+  :type 'sexp
   :group 'agent-ide-inline)
 
-(defcustom agent-ide-inline-reject-key "C-c C-k"
-  "Key sequence to reject the inline preview."
-  :type 'key-sequence
+(defcustom agent-ide-inline-response-overlay-height 8
+  "Height in lines of the inline response viewport."
+  :type 'natnum
   :group 'agent-ide-inline)
 
-(defcustom agent-ide-inline-prompt-template
-  (concat "%i\n\n"
-          "Constraint: Do not use tools and do not modify any files. "
-          "Reply with only the replacement text for the region, "
-          "without markdown fences or explanation.\n\n"
-          "Context:\n%c")
-  "Template for inline rewrite prompts.
-%i is replaced with the instruction, %c with the region context."
-  :type 'string
+(defcustom agent-ide-inline-reference-types
+  '((prog-mode region line defun window buffer)
+    (text-mode region line sentence window buffer)
+    (t region line window buffer))
+  "Things at point to offer as reference for `agent-ide-inline'.
+An alist mapping a major (derived) mode to a list of objects.  Any
+object recognized by `thing-at-point' is valid, plus `region',
+`window' (visible text) and `buffer' (entire buffer)."
+  :type '(alist :key-type symbol :value-type (repeat symbol))
   :group 'agent-ide-inline)
 
 (defcustom agent-ide-inline-ready-timeout 30
@@ -52,39 +55,55 @@
   :type 'integer
   :group 'agent-ide-inline)
 
-(defvar agent-ide-inline-history nil
-  "History for inline rewrite instructions.")
+(defconst agent-ide-inline--hrule
+  (propertize (make-string 32 ?─) 'face 'agent-ide-muted-face)
+  "Horizontal rule shown in response viewports.")
 
-(defvar agent-ide-inline--previews nil
-  "Alist mapping active sessions to preview state plists.
-Each state has keys :buffer :overlay :start :end :text :done
-:instruction.  Hooks fire in the session buffer, so state is global.")
-
-(defvar agent-ide-inline-preview-mode-map
+(defvar agent-ide-inline-response-overlay-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd agent-ide-inline-accept-key) #'agent-ide-inline-accept)
-    (define-key map (kbd agent-ide-inline-reject-key) #'agent-ide-inline-reject)
+    (define-key map (kbd "<mouse-1>")
+                #'agent-ide-inline--response-overlay-dispatch)
+    (define-key map (kbd "<mouse-4>") #'agent-ide-inline--response-overlay-up)
+    (define-key map (kbd "<wheel-up>") #'agent-ide-inline--response-overlay-up)
+    (define-key map (kbd "<mouse-5>") #'agent-ide-inline--response-overlay-down)
+    (define-key map (kbd "<wheel-down>") #'agent-ide-inline--response-overlay-down)
     map)
-  "Keymap for `agent-ide-inline-preview-mode'.")
+  "Keymap for mouse actions on response overlays.")
 
-(define-minor-mode agent-ide-inline-preview-mode
-  "Minor mode while an agent-ide inline preview is active."
-  :lighter " Inline"
-  :keymap agent-ide-inline-preview-mode-map)
+(defvar agent-ide-inline--response-overlay-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "M-RET") #'agent-ide-inline--response-overlay-dispatch)
+    (define-key map (kbd "C-M-n") #'agent-ide-inline--response-overlay-down)
+    (define-key map (kbd "C-M-p") #'agent-ide-inline--response-overlay-up)
+    (define-key map (kbd "C-M-v")
+                (lambda () (interactive)
+                  (agent-ide-inline--response-overlay-page
+                   (agent-ide-inline--response-overlay-at-point) 1)))
+    (define-key map (kbd "C-M-S-v")
+                (lambda () (interactive)
+                  (agent-ide-inline--response-overlay-page
+                   (agent-ide-inline--response-overlay-at-point) -1)))
+    map)
+  "Keymap active while an inline response overlay is visible.")
 
-(defun agent-ide-inline--strip-fences (text)
-  "Return TEXT with a single surrounding markdown code fence removed."
-  (let ((s (string-trim text)))
-    (when (string-match "\\````[^\n]*\n" s)
-      (setq s (substring s (match-end 0))))
-    (when (string-match "\n```[ \t]*\\'" s)
-      (setq s (substring s 0 (match-beginning 0))))
-    (string-trim s)))
+(defvar agent-ide-inline--overlays nil
+  "Alist mapping sessions to their active streaming response overlays.
+Only one streaming overlay per session; completed overlays stay in
+their buffers until cleared and are no longer updated.")
 
-(defun agent-ide-inline--build-prompt (instruction context)
-  "Build the rewrite prompt from INSTRUCTION and CONTEXT."
-  (format-spec agent-ide-inline-prompt-template
-               (format-spec-make ?i instruction ?c context)))
+(defvar-local agent-ide-inline--session nil
+  "Session the inline prompt window talks to.")
+
+(defvar-local agent-ide-inline--origin nil
+  "Marker in the origin buffer where the response should appear.")
+
+(defvar-local agent-ide-inline--reference-ov nil
+  "Overlay highlighting the reference in the origin buffer.")
+
+(defvar-local agent-ide-inline--reference-type nil
+  "Current reference type, a symbol.")
+
+;;; Session resolution and readiness
 
 (defun agent-ide-inline--resolve-session ()
   "Return the session for the current buffer's project directory.
@@ -95,108 +114,6 @@ Strict directory match; start a new session when none matches."
            (string= dir (file-truename (agent-ide-session-directory s))))
          agent-ide--sessions)
         (agent-ide--start-session (agent-ide--working-directory)))))
-
-(defun agent-ide-inline--region-context (start end)
-  "Return a region alist for START..END, like `agent-ide--get-region'."
-  `((:file . ,(buffer-file-name))
-    (:line-start . ,(line-number-at-pos start))
-    (:line-end . ,(line-number-at-pos end))
-    (:content . ,(buffer-substring-no-properties start end))))
-
-(defun agent-ide-inline--preview-start (session buffer start end instruction)
-  "Begin an inline preview in BUFFER over START..END for SESSION."
-  (with-current-buffer buffer
-    (let ((ov (make-overlay start end nil t t)))
-      (overlay-put ov 'display
-                   (propertize "(Working…)" 'face 'agent-ide-inline-preview-face))
-      (overlay-put ov 'priority 100)
-      (let ((state (list :buffer buffer :overlay ov
-                         :start (copy-marker start)
-                         :end (copy-marker end t)
-                         :text "" :done nil :instruction instruction)))
-        (push (cons session state) agent-ide-inline--previews)
-        (add-hook 'after-change-functions
-                  #'agent-ide-inline--buffer-changed nil t)
-        (add-hook 'kill-buffer-hook
-                  (lambda () (agent-ide-inline--teardown session)) nil t)
-        (agent-ide-inline-preview-mode 1)
-        state))))
-
-(defun agent-ide-inline--preview-update (state text)
-  "Set preview STATE text and refresh the overlay display string."
-  (setf (plist-get state :text) text)
-  (when-let* ((ov (plist-get state :overlay))
-              ((overlayp ov)))
-    (overlay-put ov 'display
-                 (propertize text 'face 'agent-ide-inline-preview-face))))
-
-(defun agent-ide-inline--preview-session (state)
-  "Return the session owning preview STATE."
-  (car (cl-find-if (lambda (entry) (eq (cdr entry) state))
-                   agent-ide-inline--previews)))
-
-(defun agent-ide-inline--preview-in-buffer ()
-  "Return the preview state for the current buffer, or nil."
-  (cl-find-if (lambda (state) (eq (plist-get state :buffer) (current-buffer)))
-              (mapcar #'cdr agent-ide-inline--previews)))
-
-(defun agent-ide-inline--teardown (session &optional message)
-  "Remove SESSION's preview and restore the edited buffer view."
-  (when-let* ((state (alist-get session agent-ide-inline--previews))
-              (buffer (plist-get state :buffer)))
-    (setq agent-ide-inline--previews
-          (assq-delete-all session agent-ide-inline--previews))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when (overlayp (plist-get state :overlay))
-          (delete-overlay (plist-get state :overlay)))
-        (remove-hook 'after-change-functions
-                     #'agent-ide-inline--buffer-changed t)
-        (when agent-ide-inline-preview-mode
-          (agent-ide-inline-preview-mode -1))))
-    (let ((m (plist-get state :start)))
-      (when (markerp m) (set-marker m nil)))
-    (let ((m (plist-get state :end)))
-      (when (markerp m) (set-marker m nil))))
-  (when message (message "%s" message)))
-
-(defun agent-ide-inline--buffer-changed (&rest _args)
-  "Cancel the active preview: the buffer was modified externally."
-  (when-let* ((state (agent-ide-inline--preview-in-buffer)))
-    (agent-ide-inline--teardown
-     (agent-ide-inline--preview-session state)
-     "Inline preview cancelled: buffer modified")))
-
-(defun agent-ide-inline--on-chunk (session text)
-  "Append chunk TEXT to SESSION's active preview."
-  (when-let* ((state (alist-get session agent-ide-inline--previews))
-              ((buffer-live-p (plist-get state :buffer)))
-              ((not (plist-get state :done))))
-    (agent-ide-inline--preview-update
-     state (concat (plist-get state :text) text))))
-
-(defun agent-ide-inline--on-response (session _response)
-  "Finalize SESSION's active preview from the completed response."
-  (when-let* ((state (alist-get session agent-ide-inline--previews))
-              ((buffer-live-p (plist-get state :buffer))))
-    (let ((final (agent-ide-inline--strip-fences (plist-get state :text))))
-      (setf (plist-get state :text) final)
-      (setf (plist-get state :done) t)
-      (if (string-empty-p final)
-          (agent-ide-inline--teardown session "Inline: empty response")
-        (agent-ide-inline--preview-update state final)
-        (message "Inline ready: %s accept, %s reject"
-                 (key-description (kbd agent-ide-inline-accept-key))
-                 (key-description (kbd agent-ide-inline-reject-key)))))))
-
-(defun agent-ide-inline--on-failure (session _error)
-  "Cancel SESSION's active preview after a failed prompt."
-  (when-let* ((state (alist-get session agent-ide-inline--previews)))
-    (agent-ide-inline--teardown session "Inline: agent request failed")))
-
-(add-hook 'agent-ide-message-chunk-functions #'agent-ide-inline--on-chunk)
-(add-hook 'agent-ide-prompt-response-functions #'agent-ide-inline--on-response)
-(add-hook 'agent-ide-prompt-failure-functions #'agent-ide-inline--on-failure)
 
 (defun agent-ide-inline--ready-p (session)
   "Return non-nil when SESSION is initialized and idle."
@@ -209,76 +126,525 @@ Strict directory match; start a new session when none matches."
    ((agent-ide-inline--ready-p session)
     (agent-ide-protocol-send-prompt session prompt))
    ((equal (agent-ide-session-status session) "failed")
-    (agent-ide-inline--teardown session "Inline: agent session failed"))
+    (agent-ide-inline--on-failure session "agent session failed"))
    ((time-less-p deadline (current-time))
-    (agent-ide-inline--teardown session "Inline: timed out waiting for agent"))
+    (agent-ide-inline--on-failure session "timed out waiting for agent"))
    (t
     (run-at-time 0.3 nil #'agent-ide-inline--send-when-ready
                  session deadline prompt))))
 
-;;;###autoload
-(defun agent-ide-inline-rewrite (start end instruction)
-  "Rewrite the region START..END per INSTRUCTION in place.
+;;; Reference cycling
 
-Displays the agent's proposal as a streaming overlay over the region.
-Accept with `agent-ide-inline-accept', reject with
-`agent-ide-inline-reject'."
-  (interactive
-   (progn
-     (unless (use-region-p)
-       (user-error "No region selected"))
-     (list (region-beginning) (region-end)
-           (read-string "Rewrite instruction: " nil
-                        'agent-ide-inline-history))))
-  (unless (> end start)
-    (user-error "Invalid region"))
-  (let* ((session (agent-ide-inline--resolve-session))
-         (context (agent-ide--format-region-context
-                   (agent-ide-inline--region-context start end)
-                   (agent-ide-session-directory session)))
-         (prompt (agent-ide-inline--build-prompt instruction context)))
+(defun agent-ide-inline--reference-types (&optional buffer)
+  "Return reference types for BUFFER's mode.
+BUFFER defaults to the origin buffer, then the current buffer."
+  (with-current-buffer
+      (or buffer
+          (and agent-ide-inline--origin
+               (marker-buffer agent-ide-inline--origin))
+          (current-buffer))
+    (append
+     (or (cl-some
+          (lambda (mode-list)
+            (and (or (eq (car mode-list) t)
+                     (derived-mode-p (car mode-list)))
+                 (cdr mode-list)))
+          agent-ide-inline-reference-types)
+         '(region line window buffer))
+     '(none))))
+
+(defun agent-ide-inline--reference-bounds (origin type)
+  "Return (START . END) for reference TYPE at ORIGIN, or nil.
+ORIGIN is a marker in the origin buffer."
+  (when (and origin (marker-buffer origin)
+             (buffer-live-p (marker-buffer origin)))
+    (with-current-buffer (marker-buffer origin)
+      (pcase type
+        ('region
+         (and (use-region-p)
+              (cons (region-beginning) (region-end))))
+        ('buffer
+         (cons (point-min) (point-max)))
+        ('window
+         (when-let* ((win (get-buffer-window (current-buffer))))
+           (with-selected-window win
+             (cons (window-start) (window-end win t)))))
+        (_
+         (save-excursion
+           (goto-char origin)
+           (pcase type
+             ('line
+              (cons (pos-bol) (pos-eol)))
+             ('defun
+              (and (fboundp 'beginning-of-defun)
+                   (ignore-errors
+                     (beginning-of-defun)
+                     (let ((start (point)))
+                       (end-of-defun)
+                       (cons start (point))))))
+             ('sentence
+              (when-let* ((bounds (bounds-of-thing-at-point 'sentence)))
+                (cons (car bounds) (cdr bounds))))
+             ('none nil))))))))
+
+(defun agent-ide-inline--reference-overlay-update (bounds)
+  "Highlight BOUNDS as the reference in the origin buffer."
+  (let ((origin agent-ide-inline--origin))
+    (when (and origin (marker-buffer origin)
+               (buffer-live-p (marker-buffer origin)))
+      (let ((buffer (marker-buffer origin)))
+        (if (and bounds (> (cdr bounds) (car bounds)))
+            (if (and agent-ide-inline--reference-ov
+                     (overlayp agent-ide-inline--reference-ov)
+                     (overlay-buffer agent-ide-inline--reference-ov))
+                (move-overlay agent-ide-inline--reference-ov
+                              (car bounds) (cdr bounds) buffer)
+              (let ((ov (make-overlay (car bounds) (cdr bounds) buffer)))
+                (overlay-put ov 'face 'secondary-selection)
+                (overlay-put ov 'evaporate t)
+                (setq agent-ide-inline--reference-ov ov)))
+          (when (and agent-ide-inline--reference-ov
+                     (overlayp agent-ide-inline--reference-ov))
+            (delete-overlay agent-ide-inline--reference-ov))
+          (setq agent-ide-inline--reference-ov nil))))))
+
+(defun agent-ide-inline-cycle-reference (&optional origin interactivep)
+  "Cycle the reference type for ORIGIN and highlight it.
+Interactively, SPC continues cycling and C-g clears."
+  (interactive (list nil t))
+  (let ((types (agent-ide-inline--reference-types))
+        (current agent-ide-inline--reference-type))
+    (let ((tail (memq (or current (car types)) types)))
+      (setq agent-ide-inline--reference-type
+            (or (cadr tail) (car types))))
+    (let ((next agent-ide-inline--reference-type)
+          (count 0))
+      (while (and next (not (agent-ide-inline--reference-bounds
+                             (or origin agent-ide-inline--origin)
+                             next))
+                  (< count (length types)))
+        (setq next (or (cadr (memq next types)) (car types))
+              count (1+ count)))
+      (setq agent-ide-inline--reference-type next))
+    (agent-ide-inline--reference-overlay-update
+     (agent-ide-inline--reference-bounds
+      (or origin agent-ide-inline--origin)
+      agent-ide-inline--reference-type))
+    (when (fboundp 'agent-ide-inline--update-prompt-header)
+      (agent-ide-inline--update-prompt-header))
+    (when interactivep
+      (set-transient-map
+       (define-keymap
+         "SPC" #'agent-ide-inline-cycle-reference
+         "C-g" (lambda () (interactive)
+                 (agent-ide-inline--reference-overlay-update nil)
+                 (setq agent-ide-inline--reference-type 'none)
+                 (agent-ide-inline--update-prompt-header)))
+       nil nil "Repeat reference cycling with SPC or clear with C-g"))))
+
+(defun agent-ide-inline--reference-text (ov)
+  "Build a reference context string from reference overlay OV."
+  (when (and ov (overlayp ov) (overlay-buffer ov))
+    (with-current-buffer (overlay-buffer ov)
+      (let* ((beg (overlay-start ov))
+             (end (overlay-end ov))
+             (file (buffer-file-name))
+             (name (buffer-name))
+             (lstart (line-number-at-pos beg))
+             (lend (line-number-at-pos end))
+             (lang (and file (file-name-extension file))))
+        (concat
+         (format "\n\nIn buffer \"%s\"" name)
+         (and file (format " (%s)" file))
+         (format ", lines %d-%d:\n" lstart lend)
+         "```" (or lang "") "\n"
+         (buffer-substring-no-properties beg end)
+         "\n```\n")))))
+
+;;; Prompt window
+
+(defun agent-ide-inline--update-prompt-header ()
+  "Refresh the prompt window header line."
+  (when (derived-mode-p 'agent-ide-inline-prompt-mode)
+    (setq header-line-format
+          (concat
+           (format " Including %s  |  Send: C-c RET, Reference: C-c SPC, "
+                   (propertize
+                    (symbol-name (or agent-ide-inline--reference-type 'none))
+                    'face 'mode-line-emphasis))
+           "Help: C-c ?, Quit: C-c C-k  |  Session: "
+           (if agent-ide-inline--session
+               (buffer-name (agent-ide-session-buffer agent-ide-inline--session))
+             "<none>")))))
+
+(defun agent-ide-inline-help ()
+  "Show a quick overview of inline window keys."
+  (interactive)
+  (message
+   (substitute-command-keys
+    "Send: \\[agent-ide-inline-send], Cycle reference: \\[agent-ide-inline-cycle-reference], Switch session: \\[agent-ide-inline-switch-session], Visit session: \\[agent-ide-inline-visit-session], Quit: \\[agent-ide-inline-quit]")))
+
+(defun agent-ide-inline-switch-session ()
+  "Switch the inline prompt window to another live session."
+  (interactive)
+  (let ((choices
+         (mapcar (lambda (s)
+                   (cons (format "%s (%s)"
+                                 (agent-ide--directory-name
+                                  (agent-ide-session-directory s))
+                                 (or (agent-ide-session-status s) "?"))
+                         s))
+                 agent-ide--sessions)))
+    (unless choices
+      (user-error "No agent-ide sessions"))
+    (let ((choice (completing-read "Session: " choices nil t)))
+      (setq agent-ide-inline--session (cdr (assoc choice choices)))
+      (agent-ide-inline--update-prompt-header))))
+
+(defun agent-ide-inline-visit-session ()
+  "Pop to the session buffer the inline window is talking to."
+  (interactive)
+  (unless agent-ide-inline--session
+    (user-error "No session"))
+  (agent-ide--display-buffer
+   (agent-ide-session-buffer agent-ide-inline--session)))
+
+(defun agent-ide-inline-quit ()
+  "Quit the inline prompt window, clearing any reference highlight."
+  (interactive)
+  (agent-ide-inline--reference-overlay-update nil)
+  (let ((buf (current-buffer)))
+    (when (derived-mode-p 'agent-ide-inline-prompt-mode)
+      (kill-buffer buf))))
+
+(defun agent-ide-inline-send ()
+  "Send the inline prompt to the session and show the response at origin."
+  (interactive)
+  (let* ((session agent-ide-inline--session)
+         (prompt (string-trim
+                  (buffer-substring-no-properties (point-min) (point-max)))))
+    (unless session
+      (user-error "No session: run `agent-ide-inline' first"))
+    (when (string-empty-p prompt)
+      (user-error "Empty prompt"))
     (when (equal (agent-ide-session-status session) "running")
       (user-error "Agent busy: interrupt the running turn first"))
-    (agent-ide-inline--preview-start session (current-buffer)
-                                     start end instruction)
-    (agent-ide-renderer-append-status session (format "Inline: %s" instruction))
-    (agent-ide-inline--send-when-ready
-     session
-     (time-add (current-time) agent-ide-inline-ready-timeout)
-     prompt)))
+    (let* ((origin agent-ide-inline--origin)
+           (reference (agent-ide-inline--reference-text
+                       agent-ide-inline--reference-ov))
+           (message (if reference (concat prompt reference) prompt)))
+      (when (and origin (marker-buffer origin)
+                 (buffer-live-p (marker-buffer origin)))
+        (agent-ide-inline--response-overlay-create
+         session (marker-buffer origin) (marker-position origin)))
+      (agent-ide-renderer-append-status
+       session (format "Inline: %s" (string-limit prompt 60)))
+      (agent-ide-inline--send-when-ready
+       session
+       (time-add (current-time) agent-ide-inline-ready-timeout)
+       message))
+    (agent-ide-inline-quit)))
 
-(defun agent-ide-inline-accept ()
-  "Accept the inline preview: replace the region with the proposal."
-  (interactive)
-  (let ((state (agent-ide-inline--preview-in-buffer)))
-    (unless state (user-error "No inline preview"))
-    (let ((start (marker-position (plist-get state :start)))
-          (end (marker-position (plist-get state :end)))
-          (text (plist-get state :text))
-          (session (agent-ide-inline--preview-session state)))
-      (when (string-empty-p text)
-        (agent-ide-inline--teardown session)
-        (user-error "No text to accept"))
-      (agent-ide-inline--teardown session)
-      (undo-boundary)
-      (goto-char end)
-      (delete-region start end)
-      (goto-char start)
-      (insert text)
-      (undo-boundary))))
+(define-derived-mode agent-ide-inline-prompt-mode text-mode "Agent-Inline"
+  "Major mode for the inline prompt window."
+  (setq-local header-line-format "")
+  (agent-ide-inline--update-prompt-header))
 
-(defun agent-ide-inline-reject ()
-  "Reject the inline preview, restoring the original text."
+(defvar agent-ide-inline-prompt-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map text-mode-map)
+    (define-key map (kbd "C-c RET") #'agent-ide-inline-send)
+    (define-key map (kbd "C-c C-m") #'agent-ide-inline-send)
+    (define-key map (kbd "C-c SPC") #'agent-ide-inline-cycle-reference)
+    (define-key map (kbd "C-c ?") #'agent-ide-inline-help)
+    (define-key map (kbd "C-c C-k") #'agent-ide-inline-quit)
+    (define-key map (kbd "C-c C-b") #'agent-ide-inline-switch-session)
+    (define-key map (kbd "C-c C-v") #'agent-ide-inline-visit-session)
+    map)
+  "Keymap for `agent-ide-inline-prompt-mode'.")
+
+;;;###autoload
+(defun agent-ide-inline ()
+  "Open an inline prompt window for the current project's agent session.
+
+The prompt window opens below the current window.  On send, the
+response streams into an overlay viewport at point.  C-c SPC cycles
+the reference context (region, line, defun, window, buffer)."
   (interactive)
-  (let ((state (agent-ide-inline--preview-in-buffer)))
-    (unless state (user-error "No inline preview"))
-    (let ((session (agent-ide-inline--preview-session state)))
-      (when (and (not (plist-get state :done))
-                 (member (agent-ide-session-status session)
-                         '("running")))
-        (ignore-errors (agent-ide-protocol-cancel session)))
-      (agent-ide-inline--teardown session)
-      (message "Inline preview rejected"))))
+  (let* ((session (agent-ide-inline--resolve-session))
+         (origin (point-marker))
+         (prompt-buf (generate-new-buffer "*agent-ide-inline*")))
+    (with-current-buffer prompt-buf
+      (agent-ide-inline-prompt-mode)
+      (setq-local agent-ide-inline--session session)
+      (setq-local agent-ide-inline--origin origin)
+      (setq-local agent-ide-inline--reference-ov nil)
+      (setq-local agent-ide-inline--reference-type nil)
+      (agent-ide-inline-cycle-reference origin)
+      (agent-ide-inline--update-prompt-header))
+    (pop-to-buffer prompt-buf agent-ide-inline-buffer-display-action)))
+
+;;; Response overlay viewport
+
+(defun agent-ide-inline--response-overlay-height (ov)
+  "Return the response viewport height for OV."
+  (or (overlay-get ov 'agent-ide-inline-height)
+      agent-ide-inline-response-overlay-height))
+
+(defun agent-ide-inline--response-overlay-create (session buffer point)
+  "Create a response viewport for SESSION in BUFFER at POINT."
+  (let* ((src (generate-new-buffer " *agent-ide-inline-response*"))
+         (ov (make-overlay point point buffer nil t)))
+    (with-current-buffer src
+      (text-mode)
+      (buffer-disable-undo))
+    (overlay-put ov 'agent-ide-inline
+                 (list :session session
+                       :session-buffer (agent-ide-session-buffer session)
+                       :src src
+                       :header "Response"
+                       :done nil))
+    (overlay-put ov 'agent-ide-inline-height
+                 agent-ide-inline-response-overlay-height)
+    (overlay-put ov 'agent-ide-inline-scroll-index 0)
+    (setf (alist-get session agent-ide-inline--overlays) ov)
+    (agent-ide-inline--response-overlay-render ov)
+    ov))
+
+(defun agent-ide-inline--response-overlay-append-chunk (ov chunk)
+  "Append CHUNK to response overlay OV and refresh its display."
+  (when (and ov (overlayp ov) (overlay-buffer ov))
+    (let* ((plist (overlay-get ov 'agent-ide-inline))
+           (src (plist-get plist :src)))
+      (when (buffer-live-p src)
+        (with-current-buffer src
+          (goto-char (point-max))
+          (let ((start (point)))
+            (insert chunk)
+            (save-excursion
+              (agent-ide-renderer-render-markdown-region
+               start (point-max))))))
+      (agent-ide-inline--response-overlay-render ov))))
+
+(defun agent-ide-inline--response-overlay-render (ov)
+  "Render response overlay OV as an after-string viewport slice."
+  (when (and ov (overlayp ov) (overlay-buffer ov))
+    (let* ((plist (overlay-get ov 'agent-ide-inline))
+           (src (plist-get plist :src))
+           (height (agent-ide-inline--response-overlay-height ov))
+           (index (or (overlay-get ov 'agent-ide-inline-scroll-index) 0))
+           (len (if (buffer-live-p src)
+                    (with-current-buffer src
+                      (line-number-at-pos (point-max)))
+                  0))
+           (view-string
+            (and (buffer-live-p src)
+                 (with-current-buffer src
+                   (goto-char (point-min))
+                   (buffer-substring
+                    (pos-bol (1+ index))
+                    (pos-eol (+ index height))))))
+           (up (if (> index 0) "⬆ " "  "))
+           (down (if (< (+ index height) len) "⬇ " "  "))
+           (header (format "%s%s %s"
+                           up down (or (plist-get plist :header) "Response")))
+           (session-name
+            (buffer-name (plist-get plist :session-buffer))))
+      (overlay-put ov 'agent-ide-inline-scroll-index index)
+      (overlay-put
+       ov 'after-string
+       (propertize
+        (concat agent-ide-inline--hrule "\n"
+                (propertize header 'face 'agent-ide-header-face) "\n"
+                (or view-string "") "\n"
+                agent-ide-inline--hrule "\n"
+                (propertize (concat " " session-name)
+                            'face 'agent-ide-muted-face))
+        'keymap agent-ide-inline-response-overlay-map
+        'pointer 'hand)))))
+
+(defun agent-ide-inline--response-overlay-set-scroll-index (ov index)
+  "Set scroll INDEX for OV, clamped to the valid range."
+  (let* ((height (agent-ide-inline--response-overlay-height ov))
+         (plist (overlay-get ov 'agent-ide-inline))
+         (src (plist-get plist :src))
+         (len (if (buffer-live-p src)
+                  (with-current-buffer src
+                    (line-number-at-pos (point-max)))
+                0))
+         (max-index (max 0 (- len height))))
+    (overlay-put ov 'agent-ide-inline-scroll-index
+                 (min (max 0 index) max-index))))
+
+(defun agent-ide-inline--response-overlay-scroll-to (index ov)
+  "Scroll OV to display line INDEX and re-render."
+  (when (and ov (overlayp ov) (overlay-buffer ov))
+    (agent-ide-inline--response-overlay-set-scroll-index ov index)
+    (agent-ide-inline--response-overlay-render ov)))
+
+(defun agent-ide-inline--response-overlay-down (&optional ov)
+  "Scroll response overlay OV down by one line."
+  (interactive (list (agent-ide-inline--response-overlay-at-point)))
+  (when ov
+    (agent-ide-inline--response-overlay-scroll-to
+     (1+ (or (overlay-get ov 'agent-ide-inline-scroll-index) 0)) ov)))
+
+(defun agent-ide-inline--response-overlay-up (&optional ov)
+  "Scroll response overlay OV up by one line."
+  (interactive (list (agent-ide-inline--response-overlay-at-point)))
+  (when ov
+    (agent-ide-inline--response-overlay-scroll-to
+     (1- (or (overlay-get ov 'agent-ide-inline-scroll-index) 0)) ov)))
+
+(defun agent-ide-inline--response-overlay-page (ov delta)
+  "Scroll OV by DELTA pages (its full height)."
+  (when ov
+    (agent-ide-inline--response-overlay-scroll-to
+     (+ (or (overlay-get ov 'agent-ide-inline-scroll-index) 0)
+        (* delta (agent-ide-inline--response-overlay-height ov)))
+     ov)))
+
+(defun agent-ide-inline--response-overlay-resize (ov delta)
+  "Resize response overlay OV by DELTA lines; non-numeric resets."
+  (interactive (list (agent-ide-inline--response-overlay-at-point)
+                     (prefix-numeric-value current-prefix-arg)))
+  (when ov
+    (if (numberp delta)
+        (overlay-put ov 'agent-ide-inline-height
+                     (max 2 (+ delta (agent-ide-inline--response-overlay-height ov))))
+      (overlay-put ov 'agent-ide-inline-height
+                   agent-ide-inline-response-overlay-height))
+    (agent-ide-inline--response-overlay-render ov)))
+
+(defun agent-ide-inline--response-overlay-at-point ()
+  "Return the inline response overlay relevant to point, or nil."
+  (let ((pos (if (consp last-input-event)
+                 (posn-point (event-start last-input-event))
+               (point))))
+    (cl-find-if (lambda (ov) (overlay-get ov 'agent-ide-inline))
+                (overlays-in (max (point-min) (1- (or pos (point))))
+                             (min (point-max) (1+ (or pos (point))))))))
+
+(define-minor-mode agent-ide-inline--response-overlay-mode
+  "Minor mode enabling keyboard actions on inline response overlays."
+  :lighter " Inline"
+  :keymap agent-ide-inline--response-overlay-mode-map)
+
+(defun agent-ide-inline--setup-response-overlay-keymap (ov)
+  "Toggle the response mode for OV based on window visibility."
+  (letrec ((toggle
+            (lambda (win _win-start)
+              (if (and (overlayp ov) (overlay-buffer ov)
+                       (eq (overlay-buffer ov) (current-buffer))
+                       (pos-visible-in-window-p (overlay-end ov) win))
+                  (or agent-ide-inline--response-overlay-mode
+                      (agent-ide-inline--response-overlay-mode 1))
+                (agent-ide-inline--response-overlay-mode -1)))))
+    (with-current-buffer (overlay-buffer ov)
+      (add-hook 'window-scroll-functions toggle nil t))))
+
+;;; Response actions
+
+(defun agent-ide-inline--response-visit (ov)
+  "Pop to the session buffer associated with OV."
+  (when-let* ((plist (overlay-get ov 'agent-ide-inline))
+              (session-buffer (plist-get plist :session-buffer))
+              ((buffer-live-p session-buffer)))
+    (pop-to-buffer session-buffer agent-ide-new-session-split)))
+
+(defun agent-ide-inline--response-reply (ov)
+  "Open the inline prompt window again to continue the conversation."
+  (when-let* ((plist (overlay-get ov 'agent-ide-inline)))
+    (when (overlay-buffer ov)
+      (with-current-buffer (overlay-buffer ov)
+        (goto-char (overlay-start ov))))
+    (call-interactively #'agent-ide-inline)))
+
+(defun agent-ide-inline--response-copy (ov)
+  "Copy the full response text of OV to the kill ring."
+  (when-let* ((plist (overlay-get ov 'agent-ide-inline))
+              (src (plist-get plist :src))
+              ((buffer-live-p src)))
+    (kill-new (with-current-buffer src (buffer-string)))))
+
+(defun agent-ide-inline-clear-response-overlay (ov &optional abort)
+  "Remove response overlay OV.
+With prefix argument ABORT, also cancel the session's active turn."
+  (interactive (list (agent-ide-inline--response-overlay-at-point)
+                     current-prefix-arg))
+  (when (and ov (overlayp ov))
+    (let ((plist (overlay-get ov 'agent-ide-inline)))
+      (when (and abort (plist-get plist :session))
+        (ignore-errors
+          (agent-ide-protocol-cancel (plist-get plist :session))))
+      (setq agent-ide-inline--overlays
+            (assq-delete-all (plist-get plist :session)
+                             agent-ide-inline--overlays))
+      (when (buffer-live-p (plist-get plist :src))
+        (kill-buffer (plist-get plist :src)))
+      (when (overlay-buffer ov)
+        (with-current-buffer (overlay-buffer ov)
+          (agent-ide-inline--response-overlay-mode -1)))
+      (delete-overlay ov))))
+
+(defun agent-ide-inline--response-overlay-dispatch (ov)
+  "Show an action menu for response overlay OV."
+  (interactive (list (agent-ide-inline--response-overlay-at-point)))
+  (unless (and ov (overlayp ov) (overlay-buffer ov))
+    (user-error "No inline response overlay"))
+  (pcase-let ((`(,choice . ,_desc)
+               (read-multiple-choice
+                "Action"
+                '((?v "visit") (?r "reply") (?c "clear")
+                  (?w "copy") (?+ "height+") (?- "height-")
+                  (?q "quit")))))
+    (pcase choice
+      (?v (agent-ide-inline--response-visit ov))
+      (?r (agent-ide-inline--response-reply ov))
+      (?c (agent-ide-inline-clear-response-overlay ov))
+      (?w (agent-ide-inline--response-copy ov))
+      (?+ (agent-ide-inline--response-overlay-resize ov 3))
+      (?- (agent-ide-inline--response-overlay-resize ov -3))
+      (?q (agent-ide-inline-clear-response-overlay ov)))))
+
+;;; Hook handlers
+
+(defun agent-ide-inline--on-chunk (session text)
+  "Append chunk TEXT to SESSION's streaming response overlay."
+  (when-let* ((ov (alist-get session agent-ide-inline--overlays))
+              ((overlayp ov))
+              ((overlay-buffer ov)))
+    (agent-ide-inline--response-overlay-append-chunk ov text)))
+
+(defun agent-ide-inline--on-response (session _response)
+  "Mark SESSION's streaming response overlay as complete."
+  (when-let* ((ov (alist-get session agent-ide-inline--overlays))
+              ((overlayp ov))
+              ((overlay-buffer ov)))
+    (let ((plist (overlay-get ov 'agent-ide-inline)))
+      (setf (plist-get plist :done) t)
+      (overlay-put ov 'agent-ide-inline plist))
+    (agent-ide-inline--response-overlay-render ov)
+    (message "Inline response ready (M-RET for actions)")))
+
+(defun agent-ide-inline--on-failure (session error)
+  "Show the failure on SESSION's streaming response overlay."
+  (when-let* ((ov (alist-get session agent-ide-inline--overlays))
+              ((overlayp ov))
+              ((overlay-buffer ov)))
+    (let ((plist (overlay-get ov 'agent-ide-inline)))
+      (setf (plist-get plist :header)
+            (format "Error: %s"
+                    (or (map-elt error 'message)
+                        (and (stringp error) error)
+                        (format "%S" error))))
+      (setf (plist-get plist :done) t)
+      (overlay-put ov 'agent-ide-inline plist))
+    (agent-ide-inline--response-overlay-render ov)))
+
+(add-hook 'agent-ide-message-chunk-functions #'agent-ide-inline--on-chunk)
+(add-hook 'agent-ide-prompt-response-functions #'agent-ide-inline--on-response)
+(add-hook 'agent-ide-prompt-failure-functions #'agent-ide-inline--on-failure)
 
 (provide 'agent-ide-inline)
 

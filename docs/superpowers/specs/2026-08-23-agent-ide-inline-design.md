@@ -1,155 +1,123 @@
-# agent-ide-inline Design
+# agent-ide-inline Design (v2)
 
-Date: 2026-08-23
-Status: approved (chat design approved 2026-08-23)
+Date: 2026-08-23 (v2 revises the same-day v1; v1 implemented the wrong
+interaction model — gptel-rewrite style — and was reworked)
+Status: approved in chat 2026-08-23
 
 ## Goal
 
-Add gptel-inline-style interaction to `agent-ide`: select a region in any
-buffer, issue a rewrite instruction, watch the agent's proposed replacement
-stream into an in-place overlay, then accept (`C-c C-c`) or reject
-(`C-c C-k`). Backend is the existing agent-ide session (pi via `pi-acp`,
-ACP protocol).
+gptel-inline-style interaction backed by an agent-ide session: a small
+prompt window bound to the project's persistent agent session; responses
+stream into an overlay viewport at point in the buffer where the command
+was invoked. The transcript buffer runs in the background and keeps the
+full conversation. No buffer text is ever rewritten.
+
+Reference: karthink/gptel-inline v0.0.5 (installed locally at
+`~/.emacs.d/elpa/gptel-inline/`).
 
 ## Requirements
 
-1. `agent-ide-inline-rewrite` works from any buffer with an active region.
-2. Proposed text streams into an overlay that visually replaces the region;
-   the original buffer text is untouched until accept.
-3. Accept replaces the region in a single undoable modification; reject
-   restores the original view with no modification.
-4. Session resolution is strict by project directory
-   (`file-truename` match). No match → start a new session for the current
-   working directory. Never fall back to the most-recent session.
-5. Inline turns are visible in the transcript (pollution allowed by design).
-6. No per-call process startup: inline reuses the long-lived pi-acp process
-   of the project's session.
-7. Existing agent-ide behavior is unchanged; all edits to existing files are
-   additive.
+1. `agent-ide-inline` works from any buffer; opens a prompt window below
+   the current window (0.33 height, dedicated).
+2. Prompt window keys: `C-c RET`/`C-c C-m` send, `C-c SPC` cycle
+   reference, `C-c ?` help, `C-c C-b` switch session, `C-c C-v` visit
+   transcript, `C-c C-k` quit. Header line shows key hints, reference
+   type, and the session buffer name.
+3. Reference cycling highlights "things at point" in the origin buffer
+   (region → line → defun → window → buffer → none, mode-dependent) with
+   the `secondary-selection` face; `SPC` repeats, `C-g` clears. Reference
+   text is injected as a markdown fenced block with buffer name and line
+   range.
+4. On send the prompt window closes; the response streams into an overlay
+   viewport at the origin point:
+   - after-string viewport: hrule + header (scroll indicators, status) +
+     height-slice (default 8 lines) + hrule + session buffer name
+   - markdown rendering via `agent-ide-renderer-render-markdown-region`
+     on a hidden source buffer (code fences, headings, inline code,
+     emphasis, links)
+   - scroll: wheel, `C-M-n`/`C-M-p`; page: `C-M-v`/`C-M-S-v`; resize:
+     numeric prefix on resize command or menu `+`/`-`; index clamped
+   - action menu (`M-RET` or `mouse-1`, `read-multiple-choice`):
+     v visit / r reply / c clear / w copy / + / − / q
+   - prefix on clear also cancels the running turn
+5. Session resolution: strict `file-truename` match on
+   `agent-ide--working-directory`; no match → start a new session. Busy
+   session → `user-error`. New sessions are waited on with a 0.3s poll
+   timer (30s timeout).
+6. The turn is visible in the transcript (pollution allowed): the user
+   prompt appears as an "Inline: …" status line, the streamed reply as a
+   normal assistant message.
+7. Chunk/response/failure wiring reuses the three hooks added for v1
+   (`agent-ide-message-chunk-functions`,
+   `agent-ide-prompt-response-functions`,
+   `agent-ide-prompt-failure-functions`) — unchanged.
+8. v1 rewrite commands (`agent-ide-inline-rewrite`, accept/reject) are
+   removed.
 
 ## Architecture
 
-New file `agent-ide-inline.el` implements the feature as a consumer of the
-existing session/protocol/transcript infrastructure. Three additive
-micro-edits wire extension points:
+Single consumer file `agent-ide-inline.el` rewritten in place; no changes
+to other package files (the Task-1 hooks in `agent-ide-transcript.el` and
+`agent-ide-protocol.el` stay as-is). State is global (hooks fire in the
+session buffer):
 
-| File | Change |
-|---|---|
-| `agent-ide-transcript.el` | In the `agent_message_chunk` branch of `agent-ide-transcript-handle-notification`, run `agent-ide-message-chunk-functions` with `(session text)` after the renderer call |
-| `agent-ide-protocol.el` | In `agent-ide-protocol-send-prompt`, run `agent-ide-prompt-response-functions` with `(session response)` at the end of the `:on-success` handler and `agent-ide-prompt-failure-functions` with `(session error)` at the end of the `:on-failure` handler |
-| `agent-ide.el` | `(require 'agent-ide-inline)` after `agent-ide-sidebar` |
-
-Rationale for the protocol hooks (a third micro-edit beyond the two
-discussed in chat): the inline flow sends its prompt through the canonical
-`agent-ide-protocol-send-prompt` path so that status/stream bookkeeping
-(`running` → `idle`, stream reset, header updates) stays in one place.
-Inline needs a turn-end signal with success/failure distinction; polling the
-session status cannot distinguish failure from success. Hooks are the
-minimal additive mechanism.
-
-## Interaction flow
-
-```
-region → M-x agent-ide-inline-rewrite → instruction (read-string)
-→ overlay replaces region visually, streaming chunks appended
-→ C-c C-c accept (region replaced, undoable) / C-c C-k reject (restore)
-```
-
-- Overlay: from region start to region end with a `display` string; original
-  text stays in the buffer, so positions don't drift while streaming.
-- While preview is active, buffer-local minor mode
-  `agent-ide-inline-preview-mode` (lighter " Inline") binds `C-c C-c`
-  (accept) and `C-c C-k` (reject). Keys are defcustoms.
-- Streaming state: chunks accumulate in a buffer-local string; each chunk
-  re-sets the overlay display string (propertized with a new face
-  `agent-ide-inline-preview-face`, default italic comment coloring).
-- Before the first chunk arrives, display shows "(Working…)".
-- Any external buffer modification while a preview is active cancels the
-  preview (accept itself is exempt via a flag). Buffer kill cleans up.
-- Accept: `undo-boundary` + delete-region + insert + `undo-boundary` (a
-  single undo step), point at end of inserted text, preview torn down.
-  Reject: overlay removed, hooks unregistered, buffer untouched.
-- Turn-end finalization: strip leading/trailing markdown fences and trim;
-  empty response → cancel preview with a message.
-
-## Session resolution and lifecycle
-
-`agent-ide-inline--resolve-session`: strict `file-truename` match against
-`agent-ide--sessions` on `agent-ide--working-directory`; no match →
-`agent-ide--start-session` (which displays the transcript window; acceptable
-per decision 1).
-
-New sessions initialize asynchronously (ACP init → `session/new`). Inline
-waits via a 0.3s timer polling for non-nil `acp-session-id` and status
-"idle"; status "failed" or a 30s deadline aborts with an error and no buffer
-modification.
-
-If the resolved session's status is "running", the command signals
-`user-error "Agent busy…"` (one ACP turn at a time; interrupt from the
-transcript).
+- `agent-ide-inline--overlays` — alist `(SESSION . OVERLAY)`; one
+  streaming overlay per session; completed overlays stay visible until
+  cleared and are no longer updated.
+- Per-overlay plist under `'agent-ide-inline`: `:session`,
+  `:session-buffer`, `:src` (hidden render buffer), `:header`, `:done`.
+- Prompt-window state is buffer-local (`agent-ide-inline--session`,
+  `--origin`, `--reference-ov`, `--reference-type`); the prompt buffer is
+  killed on send/quit.
 
 ## Data flow
 
-1. Build prompt (defcustom `agent-ide-inline-prompt-template` with `%i`
-   instruction / `%c` region context slots):
+```
+agent-ide-inline → resolve session (strict, else start) → prompt window
+  (origin marker + reference highlight)
+send → prompt + reference text → status line in transcript →
+  response overlay at origin → send-when-ready → protocol-send-prompt
+chunk hook → append into :src buffer → render-markdown-region →
+  viewport re-render (slice, clamped scroll)
+response hook → :done t, re-render, message "M-RET for actions"
+failure hook → header shows error, :done t
+clear → kill :src, delete overlay, drop alist entry (prefix: cancel turn)
+```
 
-   - instruction
-   - constraint: "Do not use tools, do not modify files. Reply with only the
-     replacement text, without markdown fences or explanation."
-   - region context via existing `agent-ide--format-region-context`
-     (`file:line-start-line-end` + content, capped at 20 lines by the
-     existing helper).
+## Interaction details
 
-2. Register buffer-local handlers on `agent-ide-message-chunk-functions`
-   (append to overlay) and `agent-ide-prompt-response-functions` /
-   `agent-ide-prompt-failure-functions` (finalize / cancel).
-
-3. Append a status line "Inline: <instruction>" to the transcript
-   (`agent-ide-renderer-append-status`) so pollution is readable, then send
-   via `agent-ide-protocol-send-prompt`.
-
-4. Chunks render in the transcript as usual (allowed pollution) and are
-   mirrored into the overlay via the chunk hook.
-
-Known cosmetic gap (V1): the inline user prompt appears as a status line,
-not a full user message line; the assistant's streamed reply renders as a
-normal message.
+- Reference bounds: region/window/buffer cases are origin-independent;
+  line/defun/sentence use the origin position.
+- Viewport render slices the src buffer via `pos-bol`/`pos-eol` line
+  arithmetic; the scroll index is clamped to `[0, len-height]`.
+- Markdown chunks are rendered incrementally (like the transcript), so
+  fences fontify progressively.
+- Overlay keymap is attached to the after-string; a buffer-local minor
+  mode (`agent-ide-inline--response-overlay-mode`) supplies keyboard
+  actions while the viewport is visible.
 
 ## Error handling
 
 | Case | Behavior |
 |---|---|
-| No active region | `user-error` |
-| Session busy | `user-error "Agent busy…"` |
-| New session failed / readiness timeout | error message, no modification |
-| Prompt request failure | cancel preview, echo error |
-| Empty response at turn end | cancel preview, message |
-| External buffer edit during preview | cancel preview |
-| Reject while streaming | `agent-ide-protocol-cancel` + teardown; late chunks ignored |
+| No session in prompt window / empty prompt | `user-error` |
+| Session busy | `user-error`, prompt window stays open |
+| New session failed / readiness timeout | error shown in viewport header |
+| Prompt request failure | failure hook → header shows error |
+| Origin buffer killed before response | response still rendered in transcript; no viewport |
 
 ## Testing
 
-ERT, following repo conventions (`with-temp-buffer`, fake sessions via
-`agent-ide--make-session`, `cl-letf` stubs). New file
-`agent-ide-inline-test.el`:
-
-1. Hook wiring: transcript notification handler runs chunk hook; send-prompt
-   success/failure run response/failure hooks.
-2. `agent-ide-inline--strip-fences`: fences, no fences, empty.
-3. Prompt building: contains instruction, constraint, region context.
-4. Session resolution: matching dir returned; no match → start-session
-   called with working directory; busy status → user-error.
-5. Preview: create/accept/reject on a temp buffer; accept yields exact
-   replacement text and is undoable; reject leaves buffer unchanged.
-6. External modification cancels preview.
-
-Test runner: `emacs -batch -l agent-ide-inline-test.el -f
-ert-run-tests-batch-and-exit` (repo has no Makefile/CI).
+ERT (repo conventions). `agent-ide-inline-test.el` rewritten: 25 tests
+covering hook wiring (3), session resolution/readiness (5), reference
+bounds/types/text (5), prompt window (3), viewport streaming/scroll/
+resize/copy/clear (7), dispatch (2), turn-end (2).
 
 ## Scope
 
-In V1: `agent-ide-inline-rewrite` + accept/reject preview.
+In V2: prompt window, reference cycling, streaming markdown viewport,
+action menu, visit/reply/copy/clear/resize, abort-on-prefix-clear.
 
-Out of scope (follow-ups): `insert-prompt-here`, multi-variant cycling,
-completion at point, diff-style preview, per-project inline model override,
-queuing while busy.
+Out of scope (follow-ups): mouse drag of the viewport, org-element
+references, `gptel-inline-append`-style multi-part prompts, tool-call
+confirmation inside the viewport (transcript handles permissions today).

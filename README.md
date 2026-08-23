@@ -68,20 +68,31 @@ Type your prompt and press `C-c C-m` (or `Return` with a configured binding) to 
 | `agent-ide-yank-region` | `C-c C-y` | Insert the active region as file+line context |
 | `agent-ide-sidebar` | `C-c C-b` | Focus the session sidebar |
 
-### Inline editing (gptel-inline style)
+### Inline interaction (gptel-inline style)
 
-Select a region in any buffer and run `M-x agent-ide-inline-rewrite`.
-The agent's proposed replacement streams into an overlay over the region.
-Accept with `C-c C-c` (replaces the region, undoable) or reject with
-`C-c C-k` (restores the original text). The turn is visible in the
-project's transcript buffer. Keys are configurable via
-`agent-ide-inline-accept-key` / `agent-ide-inline-reject-key`.
+`M-x agent-ide-inline` opens a small prompt window below the current
+window, bound to the current project's agent session. The session's
+transcript buffer runs in the background and keeps the full conversation.
+Responses stream into an overlay viewport at point in the buffer where
+you invoked the command.
 
-| Command | Keybinding | Description |
-|---|---|---|
-| `agent-ide-inline-rewrite` | — | Rewrite the region per an instruction |
-| `agent-ide-inline-accept` | `C-c C-c` | Accept the proposed replacement |
-| `agent-ide-inline-reject` | `C-c C-k` | Reject and restore the original |
+| Key | Action |
+|---|---|
+| `C-c RET` / `C-c C-m` | Send the prompt; the window closes and the response streams into a viewport at point |
+| `C-c SPC` | Cycle the reference context (region, line, defun, window, buffer); `SPC` repeats, `C-g` clears |
+| `C-c ?` | Show key help |
+| `C-c C-b` | Switch the conversation to another live session |
+| `C-c C-v` | Visit the session's transcript buffer |
+| `C-c C-k` | Quit the prompt window |
+
+On the response viewport:
+
+| Key / Mouse | Action |
+|---|---|
+| `M-RET` or `mouse-1` | Action menu: visit / reply / clear / copy / height± / quit |
+| `C-M-n` / `C-M-p`, mouse wheel | Scroll the viewport |
+| `C-M-v` / `C-M-S-v` | Page up/down |
+| `C-c C-u` (prefix) | Clearing with a prefix also aborts the running turn |
 
 ### Prompt keys
 

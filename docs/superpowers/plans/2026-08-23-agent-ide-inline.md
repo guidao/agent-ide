@@ -1,5 +1,13 @@
 # agent-ide-inline Implementation Plan
 
+> **Superseded 2026-08-23:** the v1 plan below implemented a gptel-rewrite
+> style feature. After review, the feature was reworked to gptel-inline
+> style interaction (see `docs/superpowers/specs/2026-08-23-agent-ide-inline-design.md`
+> v2). The hook wiring in Task 1 remains valid and unchanged; Tasks 2-3
+> were redone under TDD in the same files.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add gptel-inline-style in-place region editing to agent-ide, backed by the existing ACP session (pi via pi-acp).
