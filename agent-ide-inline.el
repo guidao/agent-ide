@@ -401,6 +401,7 @@ the reference context (region, line, defun, window, buffer)."
          (ov (make-overlay point point buffer nil t)))
     (with-current-buffer src
       (text-mode)
+      (valign-mode 1)
       (buffer-disable-undo))
     (overlay-put ov 'agent-ide-inline
                  (list :session session
@@ -419,18 +420,20 @@ the reference context (region, line, defun, window, buffer)."
     ov))
 
 (defun agent-ide-inline--response-overlay-append-chunk (ov chunk)
-  "Append CHUNK to response overlay OV and refresh its display."
+  "Append CHUNK to response overlay OV and refresh its display.
+Re-renders the whole response buffer so markdown constructs that span
+multiple chunks (fences, emphasis) render once complete, matching the
+transcript's streaming behavior."
   (when (and ov (overlayp ov) (overlay-buffer ov))
     (let* ((plist (overlay-get ov 'agent-ide-inline))
            (src (plist-get plist :src)))
       (when (buffer-live-p src)
         (with-current-buffer src
           (goto-char (point-max))
-          (let ((start (point)))
-            (insert chunk)
-            (save-excursion
-              (agent-ide-renderer-render-markdown-region
-               start (point-max))))))
+          (insert chunk)
+          (save-excursion
+            (agent-ide-renderer-render-markdown-region
+             (point-min) (point-max)))))
       (agent-ide-inline--response-overlay-render ov))))
 
 (defun agent-ide-inline--response-overlay-render (ov)

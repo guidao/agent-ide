@@ -325,6 +325,50 @@ not the buffer the command happens to run in (the prompt window)."
       (should (eq (agent-ide-inline--response-overlay-at-point) ov))
       (agent-ide-inline-clear-response-overlay ov))))
 
+(ert-deftest agent-ide-inline-markdown-bold-across-chunks-renders ()
+  "Bold spanning multiple chunks is rendered once complete."
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (agent-ide-inline--on-chunk session "here is **bo")
+      (agent-ide-inline--on-chunk session "ld** text")
+      (let* ((plist (overlay-get ov 'agent-ide-inline))
+             (src (plist-get plist :src)))
+        (with-current-buffer src
+          ;; buffer positions are 1-based; string-match-p is 0-based
+          (let ((i (1+ (string-match-p "bold" (buffer-string)))))
+            (should i)
+            (should (member 'bold
+                            (ensure-list
+                             (get-text-property i 'face))))))
+        (agent-ide-inline-clear-response-overlay ov)))))
+
+(ert-deftest agent-ide-inline-markdown-fence-across-chunks-renders ()
+  "Code fences spanning multiple chunks hide delimiters and mark content."
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point))))
+      (agent-ide-inline--on-chunk session "```elisp\n(progn\n  (message ")
+      (agent-ide-inline--on-chunk session "\"hi\"))\n```\n")
+      (let* ((plist (overlay-get ov 'agent-ide-inline))
+             (src (plist-get plist :src)))
+        (with-current-buffer src
+          (let* ((s (buffer-string))
+                 ;; buffer positions are 1-based; string-match-p is 0-based
+                 (fence-pos (1+ (string-match-p "```elisp" s)))
+                 (code-pos (1+ (string-match-p "(progn" s))))
+            (should fence-pos)
+            (should (equal (get-text-property fence-pos 'display) ""))
+            (should (get-text-property code-pos
+                                       'agent-ide-markdown-code-content))))
+        (agent-ide-inline-clear-response-overlay ov)))))
+
 (ert-deftest agent-ide-inline-response-overlay-streams-chunks ()
   (with-temp-buffer
     (insert "origin text\n")
