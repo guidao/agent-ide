@@ -56,8 +56,12 @@ object recognized by `thing-at-point' is valid, plus `region',
   :group 'agent-ide-inline)
 
 (defconst agent-ide-inline--hrule
-  (propertize (make-string 32 ?─) 'face 'agent-ide-muted-face)
-  "Horizontal rule shown in response viewports.")
+  (concat "\n" (propertize "\n"
+                            'face '(:inherit agent-ide-muted-face
+                                     :underline t :extend t)))
+  "Horizontal rule shown in response viewports.
+A blank line followed by an extended underline, so the rule spans
+the full window width and adapts to window resizes.")
 
 (defvar agent-ide-inline-response-overlay-map
   (let ((map (make-sparse-keymap)))
@@ -454,10 +458,10 @@ the reference context (region, line, defun, window, buffer)."
       (overlay-put
        ov 'after-string
        (propertize
-        (concat agent-ide-inline--hrule "\n"
+        (concat agent-ide-inline--hrule
                 (propertize header 'face 'agent-ide-header-face) "\n"
-                (or view-string "") "\n"
-                agent-ide-inline--hrule "\n"
+                (or view-string "")
+                agent-ide-inline--hrule
                 (propertize (concat " " session-name)
                             'face 'agent-ide-muted-face))
         'keymap agent-ide-inline-response-overlay-map

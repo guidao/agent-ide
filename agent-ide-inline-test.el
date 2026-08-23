@@ -244,6 +244,14 @@
 
 ;;; Response overlay viewport
 
+(ert-deftest agent-ide-inline-hrule-uses-extended-underline ()
+  "The viewport rule is an extended underline, spanning the window."
+  (let ((rule agent-ide-inline--hrule))
+    (should-not (string-match-p "─" rule))
+    (should (equal (text-properties-at 1 rule)
+                   '(face (:inherit agent-ide-muted-face
+                                     :underline t :extend t))))))
+
 (ert-deftest agent-ide-inline-response-overlay-streams-chunks ()
   (with-temp-buffer
     (insert "origin text\n")
