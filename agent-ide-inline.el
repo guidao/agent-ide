@@ -345,11 +345,6 @@ Interactively, SPC continues cycling and C-g clears."
        message))
     (agent-ide-inline-quit)))
 
-(define-derived-mode agent-ide-inline-prompt-mode text-mode "Agent-Inline"
-  "Major mode for the inline prompt window."
-  (setq-local header-line-format "")
-  (agent-ide-inline--update-prompt-header))
-
 (defvar agent-ide-inline-prompt-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map text-mode-map)
@@ -362,6 +357,11 @@ Interactively, SPC continues cycling and C-g clears."
     (define-key map (kbd "C-c C-v") #'agent-ide-inline-visit-session)
     map)
   "Keymap for `agent-ide-inline-prompt-mode'.")
+
+(define-derived-mode agent-ide-inline-prompt-mode text-mode "Agent-Inline"
+  "Major mode for the inline prompt window."
+  (setq-local header-line-format "")
+  (agent-ide-inline--update-prompt-header))
 
 ;;;###autoload
 (defun agent-ide-inline ()

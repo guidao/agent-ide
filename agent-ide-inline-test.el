@@ -178,6 +178,14 @@
 
 ;;; Prompt window
 
+(ert-deftest agent-ide-inline-prompt-mode-binds-send-key ()
+  (should (eq (lookup-key agent-ide-inline-prompt-mode-map (kbd "C-c RET"))
+              #'agent-ide-inline-send))
+  (should (eq (lookup-key agent-ide-inline-prompt-mode-map (kbd "C-c SPC"))
+              #'agent-ide-inline-cycle-reference))
+  (should (eq (lookup-key agent-ide-inline-prompt-mode-map (kbd "C-c C-k"))
+              #'agent-ide-inline-quit)))
+
 (ert-deftest agent-ide-inline-opens-prompt-buffer-with-session ()
   (with-temp-buffer
     (insert "origin buffer")
