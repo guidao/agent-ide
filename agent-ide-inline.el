@@ -197,6 +197,55 @@ Strict directory match; start a new session when none matches."
 (add-hook 'agent-ide-prompt-response-functions #'agent-ide-inline--on-response)
 (add-hook 'agent-ide-prompt-failure-functions #'agent-ide-inline--on-failure)
 
+(defun agent-ide-inline--ready-p (session)
+  "Return non-nil when SESSION is initialized and idle."
+  (and (agent-ide-session-acp-session-id session)
+       (equal (agent-ide-session-status session) "idle")))
+
+(defun agent-ide-inline--send-when-ready (session deadline prompt)
+  "Send PROMPT once SESSION is ready, or retry until DEADLINE."
+  (cond
+   ((agent-ide-inline--ready-p session)
+    (agent-ide-protocol-send-prompt session prompt))
+   ((equal (agent-ide-session-status session) "failed")
+    (agent-ide-inline--teardown session "Inline: agent session failed"))
+   ((time-less-p deadline (current-time))
+    (agent-ide-inline--teardown session "Inline: timed out waiting for agent"))
+   (t
+    (run-at-time 0.3 nil #'agent-ide-inline--send-when-ready
+                 session deadline prompt))))
+
+;;;###autoload
+(defun agent-ide-inline-rewrite (start end instruction)
+  "Rewrite the region START..END per INSTRUCTION in place.
+
+Displays the agent's proposal as a streaming overlay over the region.
+Accept with `agent-ide-inline-accept', reject with
+`agent-ide-inline-reject'."
+  (interactive
+   (progn
+     (unless (use-region-p)
+       (user-error "No region selected"))
+     (list (region-beginning) (region-end)
+           (read-string "Rewrite instruction: " nil
+                        'agent-ide-inline-history))))
+  (unless (> end start)
+    (user-error "Invalid region"))
+  (let* ((session (agent-ide-inline--resolve-session))
+         (context (agent-ide--format-region-context
+                   (agent-ide-inline--region-context start end)
+                   (agent-ide-session-directory session)))
+         (prompt (agent-ide-inline--build-prompt instruction context)))
+    (when (equal (agent-ide-session-status session) "running")
+      (user-error "Agent busy: interrupt the running turn first"))
+    (agent-ide-inline--preview-start session (current-buffer)
+                                     start end instruction)
+    (agent-ide-renderer-append-status session (format "Inline: %s" instruction))
+    (agent-ide-inline--send-when-ready
+     session
+     (time-add (current-time) agent-ide-inline-ready-timeout)
+     prompt)))
+
 (defun agent-ide-inline-accept ()
   "Accept the inline preview: replace the region with the proposal."
   (interactive)

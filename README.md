@@ -68,6 +68,21 @@ Type your prompt and press `C-c C-m` (or `Return` with a configured binding) to 
 | `agent-ide-yank-region` | `C-c C-y` | Insert the active region as file+line context |
 | `agent-ide-sidebar` | `C-c C-b` | Focus the session sidebar |
 
+### Inline editing (gptel-inline style)
+
+Select a region in any buffer and run `M-x agent-ide-inline-rewrite`.
+The agent's proposed replacement streams into an overlay over the region.
+Accept with `C-c C-c` (replaces the region, undoable) or reject with
+`C-c C-k` (restores the original text). The turn is visible in the
+project's transcript buffer. Keys are configurable via
+`agent-ide-inline-accept-key` / `agent-ide-inline-reject-key`.
+
+| Command | Keybinding | Description |
+|---|---|---|
+| `agent-ide-inline-rewrite` | — | Rewrite the region per an instruction |
+| `agent-ide-inline-accept` | `C-c C-c` | Accept the proposed replacement |
+| `agent-ide-inline-reject` | `C-c C-k` | Reject and restore the original |
+
 ### Prompt keys
 
 | Key | Action |

@@ -105,6 +105,7 @@ is created.  Use `agent-ide-set-model' to switch models interactively."
 (require 'agent-ide-transcript)
 (require 'agent-ide-session)
 (require 'agent-ide-sidebar)
+(require 'agent-ide-inline)
 
 (provide 'agent-ide)
 
