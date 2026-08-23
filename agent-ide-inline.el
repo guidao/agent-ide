@@ -412,9 +412,10 @@ the reference context (region, line, defun, window, buffer)."
                  agent-ide-inline-response-overlay-height)
     (overlay-put ov 'agent-ide-inline-scroll-index 0)
     (setf (alist-get session agent-ide-inline--overlays) ov)
-    (agent-ide-inline--response-overlay-render ov)
-    (agent-ide-inline--setup-response-overlay-keymap ov)
-    (agent-ide-inline--response-overlay-mode 1)
+    (with-current-buffer buffer
+      (agent-ide-inline--response-overlay-render ov)
+      (agent-ide-inline--setup-response-overlay-keymap ov)
+      (agent-ide-inline--response-overlay-mode 1))
     ov))
 
 (defun agent-ide-inline--response-overlay-append-chunk (ov chunk)

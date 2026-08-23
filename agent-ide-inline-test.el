@@ -297,15 +297,21 @@
       (agent-ide-inline-clear-response-overlay ov))))
 
 (ert-deftest agent-ide-inline-response-overlay-create-enables-actions-mode ()
-  "Creating a viewport enables the keyboard actions mode immediately."
+  "Creating a viewport enables actions mode in the ORIGIN buffer,
+not the buffer the command happens to run in (the prompt window)."
   (with-temp-buffer
     (insert "origin\n")
     (goto-char (point-min))
-    (let* ((session (agent-ide-inline-test--session))
-           (ov (agent-ide-inline--response-overlay-create
-                session (current-buffer) (point))))
-      (should agent-ide-inline--response-overlay-mode)
-      (agent-ide-inline-clear-response-overlay ov))))
+    (let* ((origin-buf (current-buffer))
+           (session (agent-ide-inline-test--session))
+           (ov nil))
+      ;; send runs in the prompt buffer; overlay lives in the origin buffer
+      (with-temp-buffer
+        (setq ov (agent-ide-inline--response-overlay-create
+                  session origin-buf 1)))
+      (with-current-buffer origin-buf
+        (should agent-ide-inline--response-overlay-mode)
+        (agent-ide-inline-clear-response-overlay ov)))))
 
 (ert-deftest agent-ide-inline-response-overlay-at-point-searches-window ()
   "Actions find the viewport anywhere in the visible window."
