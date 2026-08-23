@@ -252,6 +252,26 @@
                    '(face (:inherit agent-ide-muted-face
                                      :underline t :extend t))))))
 
+(ert-deftest agent-ide-inline-response-overlay-name-right-aligned ()
+  "The session buffer name at the bottom is right-aligned."
+  (with-temp-buffer
+    (insert "origin\n")
+    (goto-char (point-min))
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create
+                session (current-buffer) (point)))
+           (after (overlay-get ov 'after-string))
+           (name (buffer-name (agent-ide-session-buffer session)))
+           (aligned nil))
+      (should (string-match-p (regexp-quote (string-trim name)) after))
+      (dotimes (i (length after))
+        (let ((disp (get-text-property i 'display after)))
+          (when (and (eq (car-safe disp) 'space)
+                     (memq 'right (caddr disp)))
+            (setq aligned t))))
+      (should aligned)
+      (agent-ide-inline-clear-response-overlay ov))))
+
 (ert-deftest agent-ide-inline-response-overlay-streams-chunks ()
   (with-temp-buffer
     (insert "origin text\n")

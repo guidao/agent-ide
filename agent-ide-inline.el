@@ -462,8 +462,10 @@ the reference context (region, line, defun, window, buffer)."
                 (propertize header 'face 'agent-ide-header-face) "\n"
                 (or view-string "")
                 agent-ide-inline--hrule
-                (propertize (concat " " session-name)
-                            'face 'agent-ide-muted-face))
+                (propertize " " 'display
+                            `(space :align-to
+                                    (- right ,(length session-name))))
+                (propertize session-name 'face 'agent-ide-muted-face))
         'keymap agent-ide-inline-response-overlay-map
         'pointer 'hand)))))
 
