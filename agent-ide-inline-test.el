@@ -186,6 +186,30 @@
   (should (eq (lookup-key agent-ide-inline-prompt-mode-map (kbd "C-c C-k"))
               #'agent-ide-inline-quit)))
 
+(ert-deftest agent-ide-inline-captures-origin-before-resolving-session ()
+  "Origin must be the invocation buffer even if session setup switches buffers."
+  (with-temp-buffer
+    (insert "origin buffer")
+    (goto-char 5)
+    (let* ((origin-buf (current-buffer))
+           (session (agent-ide-inline-test--session))
+           (displayed nil))
+      ;; Resolving a session can switch buffers (new sessions display and
+      ;; select their transcript window); origin must be captured before.
+      (cl-letf (((symbol-function 'agent-ide-inline--resolve-session)
+                 (lambda ()
+                   (switch-to-buffer (get-buffer-create "*elsewhere*"))
+                   (goto-char (point-max))
+                   session))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf _action) (setq displayed buf))))
+        (agent-ide-inline))
+      (with-current-buffer displayed
+        (should (eq (marker-buffer agent-ide-inline--origin) origin-buf))
+        (should (= (marker-position agent-ide-inline--origin) 5)))
+      (kill-buffer displayed)
+      (kill-buffer (get-buffer "*elsewhere*")))))
+
 (ert-deftest agent-ide-inline-opens-prompt-buffer-with-session ()
   (with-temp-buffer
     (insert "origin buffer")

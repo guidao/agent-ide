@@ -375,8 +375,8 @@ The prompt window opens below the current window.  On send, the
 response streams into an overlay viewport at point.  C-c SPC cycles
 the reference context (region, line, defun, window, buffer)."
   (interactive)
-  (let* ((session (agent-ide-inline--resolve-session))
-         (origin (point-marker))
+  (let* ((origin (point-marker)) ; capture before session setup switches buffers
+         (session (agent-ide-inline--resolve-session))
          (prompt-buf (generate-new-buffer "*agent-ide-inline*")))
     (with-current-buffer prompt-buf
       (agent-ide-inline-prompt-mode)
