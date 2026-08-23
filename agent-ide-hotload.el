@@ -26,6 +26,7 @@
     "agent-ide-session.el"
     "agent-ide-transcript.el"
     "agent-ide-sidebar.el"
+    "agent-ide-inline.el"
     "agent-ide.el")
   "Project source files in load order (respecting dependencies).")
 
