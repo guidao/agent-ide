@@ -23,6 +23,14 @@
   "Default model ID applied after session creation.
 See also `agent-ide-set-model' for interactive switching.")
 
+(defvar agent-ide-prompt-response-functions nil
+  "Hook run after a successful prompt response.
+Called with (SESSION RESPONSE) after status is set to idle.")
+
+(defvar agent-ide-prompt-failure-functions nil
+  "Hook run after a failed prompt.
+Called with (SESSION ERROR) after status is set to idle.")
+
 (defvar agent-ide-client-info
   '((name . "agent-ide")
     (title . "Emacs Agent IDE")
@@ -180,7 +188,9 @@ When SILENT is non-nil, suppress status messages."
                    (unless (string= stop-reason "end_turn")
                      (agent-ide-renderer-append-status
                       session
-                      (format "Stopped: %s" stop-reason)))))
+                      (format "Stopped: %s" stop-reason))))
+                 (run-hook-with-args 'agent-ide-prompt-response-functions
+                                     session response))
    :on-failure (lambda (error)
                  (agent-ide-renderer-reset-stream session)
                  (agent-ide--set-status session "idle")
@@ -189,7 +199,9 @@ When SILENT is non-nil, suppress status messages."
                  (agent-ide-renderer-append-error
                   session
                   (or (map-elt error 'message)
-                      (format "%S" error))))))
+                      (format "%S" error)))
+                 (run-hook-with-args 'agent-ide-prompt-failure-functions
+                                     session error))))
 
 (defun agent-ide-protocol-cancel (session)
   "Cancel active turn for SESSION."

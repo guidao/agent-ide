@@ -15,6 +15,10 @@
 (require 'agent-ide-renderer)
 (require 'agent-ide-protocol)
 
+(defvar agent-ide-message-chunk-functions nil
+  "Hook run for each agent message text chunk.
+Called with (SESSION TEXT) after the chunk is rendered in the transcript.")
+
 (defun agent-ide-transcript--alist-object-p (value)
   "Return non-nil when VALUE is an ACP object represented as an alist."
   (and (listp value)
@@ -675,10 +679,11 @@ ACP `tool_call_update' events report arguments in their `title' field."
             (kind (map-elt update 'sessionUpdate)))
        (pcase kind
          ("agent_message_chunk"
-          (agent-ide-renderer-append-stream-chunk
-           session
-           'message
-           (agent-ide-transcript--content-text (map-elt update 'content))))
+          (let ((text (agent-ide-transcript--content-text
+                       (map-elt update 'content))))
+            (agent-ide-renderer-append-stream-chunk session 'message text)
+            (run-hook-with-args 'agent-ide-message-chunk-functions
+                                session text)))
          ("agent_thought_chunk"
           (agent-ide-renderer-append-stream-chunk
            session
