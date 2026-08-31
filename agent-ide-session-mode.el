@@ -30,6 +30,117 @@
 (declare-function agent-ide-yank-region "agent-ide-session" ())
 (declare-function agent-ide-sidebar "agent-ide-sidebar" ())
 
+(defun agent-ide-session--pending-permission ()
+  "Return the current session and its newest pending permission."
+  (let ((session (agent-ide--current-session)))
+    (unless session
+      (user-error "No Agent IDE session in this buffer"))
+    (let ((permission
+           (agent-ide-renderer-pending-permission session)))
+      (unless permission
+        (user-error "No pending permission request"))
+      (cons session permission))))
+
+(defun agent-ide-session--permission-option-text (option)
+  "Return normalized searchable text for permission OPTION."
+  (let ((text
+         (mapconcat
+          (lambda (value) (format "%s" value))
+          (delq nil (list (map-elt option 'kind)
+                          (map-elt option 'optionId)
+                          (map-elt option 'id)
+                          (map-elt option 'name)
+                          (map-elt option 'title)))
+          " ")))
+    (downcase
+     (replace-regexp-in-string
+      "[-_]+" " "
+      (let ((case-fold-search nil))
+        (replace-regexp-in-string
+         "\\([[:lower:]]\\)\\([[:upper:]]\\)" "\\1 \\2" text))))))
+
+(defun agent-ide-session--find-permission-option (options action)
+  "Find in OPTIONS the permission option for ACTION.
+ACTION is one of `allow-once', `allow-always', or `reject'."
+  (let ((kind (pcase action
+                ('allow-once "allow_once")
+                ('allow-always "allow_always")
+                ('reject "reject_once"))))
+    (or (seq-find (lambda (option)
+                    (equal (map-elt option 'kind) kind))
+                  options)
+        (seq-find
+         (lambda (option)
+           (let ((text (agent-ide-session--permission-option-text option)))
+             (pcase action
+               ('allow-once
+                (and (string-match-p "\\b\\(allow\\|accept\\|approve\\)\\b"
+                                     text)
+                     (not (string-match-p "\\b\\(always\\|persistent\\)\\b"
+                                          text))))
+               ('allow-always
+                (and (string-match-p "\\b\\(allow\\|accept\\|approve\\)\\b"
+                                     text)
+                     (string-match-p "\\b\\(always\\|persistent\\)\\b"
+                                     text)))
+               ('reject
+                (string-match-p "\\b\\(reject\\|decline\\|deny\\)\\b"
+                                text)))))
+         options))))
+
+(defun agent-ide-session--respond-to-option (action)
+  "Respond to the newest pending permission using ACTION."
+  (pcase-let* ((`(,session ,key . ,record)
+                (agent-ide-session--pending-permission))
+               (option
+                (agent-ide-session--find-permission-option
+                 (plist-get record :options) action)))
+    (unless option
+      (user-error "This permission request has no %s option"
+                  (pcase action
+                    ('allow-once "allow once")
+                    ('allow-always "always allow")
+                    ('reject "decline"))))
+    (agent-ide-renderer-respond-permission
+     session key (agent-ide-renderer--permission-option-id option))))
+
+(defun agent-ide-approve-permission (&optional always)
+  "Approve the newest pending permission request.
+With prefix argument ALWAYS, select the always-allow option."
+  (interactive "P")
+  (agent-ide-session--respond-to-option
+   (if always 'allow-always 'allow-once)))
+
+(defun agent-ide-decline-permission ()
+  "Decline the newest pending permission request."
+  (interactive)
+  (agent-ide-session--respond-to-option 'reject))
+
+(defun agent-ide-select-permission-option ()
+  "Choose a response for the newest pending permission request."
+  (interactive)
+  (pcase-let* ((`(,session ,key . ,record)
+                (agent-ide-session--pending-permission))
+               (options (plist-get record :options))
+               (choices
+                (append
+                 (mapcar
+                  (lambda (option)
+                    (let ((id
+                           (agent-ide-renderer--permission-option-id option)))
+                      (cons
+                       (format "%s [%s]"
+                               (or (map-elt option 'name)
+                                   (map-elt option 'title)
+                                   id)
+                               id)
+                       id)))
+                  options)
+                 '(("Cancel" . nil))))
+               (choice (completing-read "Permission: " choices nil t)))
+    (agent-ide-renderer-respond-permission
+     session key (cdr (assoc-string choice choices)))))
+
 (defvar agent-ide-session-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map text-mode-map)
@@ -41,6 +152,9 @@
     (define-key map (kbd "C-c C-m") #'agent-ide-submit)
     (define-key map (kbd "C-c C-s") #'agent-ide-set-model)
     (define-key map (kbd "C-c C-b") #'agent-ide-sidebar)
+    (define-key map (kbd "C-c C-a") #'agent-ide-approve-permission)
+    (define-key map (kbd "C-c C-d") #'agent-ide-decline-permission)
+    (define-key map (kbd "C-c C-p") #'agent-ide-select-permission-option)
     map)
   "Keymap for `agent-ide-session-mode'.")
 

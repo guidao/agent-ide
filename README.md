@@ -67,6 +67,9 @@ Type your prompt and press `C-c C-m` (or `Return` with a configured binding) to 
 | `agent-ide-set-model` | `C-c C-s` | Switch the agent model (completing-read) |
 | `agent-ide-yank-region` | `C-c C-y` | Insert the active region as file+line context |
 | `agent-ide-sidebar` | `C-c C-b` | Focus the session sidebar |
+| `agent-ide-approve-permission` | `C-c C-a` | Allow the newest pending request once; use `C-u` to always allow |
+| `agent-ide-decline-permission` | `C-c C-d` | Decline the newest pending request |
+| `agent-ide-select-permission-option` | `C-c C-p` | Choose any offered permission response or cancel |
 
 ### Inline interaction (gptel-inline style)
 
@@ -113,7 +116,7 @@ The header shows: **model name** · **project directory** · **context usage** /
 - **Streaming messages** — agent text appears word-by-word, markdown-rendered as it arrives.
 - **Thinking blocks** — agent reasoning is shown inside foldable blocks (collapsed by default).
 - **Tool calls** — each tool invocation gets a compact summary with expandable output; diffs are syntax-highlighted.
-- **Permission prompts** — inline `[accept]` / `[decline]` / `[cancel]` buttons when the agent requests approval.
+- **Permission prompts** — inline buttons plus cursor-independent shortcuts: `C-c C-a` allows once, `C-u C-c C-a` always allows, `C-c C-d` declines, and `C-c C-p` shows every option.
 - **Plan rendering** — when the agent produces a plan, entries are listed inline.
 - **Read-only transcript** — all agent output is frozen; only the current prompt is editable.
 

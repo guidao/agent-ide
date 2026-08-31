@@ -606,6 +606,111 @@
       (should (search-forward "[decline]" nil t))
       (should (search-forward "[cancel]" nil t)))))
 
+(ert-deftest agent-ide-session-permission-shortcuts-are-bound ()
+  "Permission actions have cursor-independent session key bindings."
+  (should (eq (lookup-key agent-ide-session-mode-map (kbd "C-c C-a"))
+              #'agent-ide-approve-permission))
+  (should (eq (lookup-key agent-ide-session-mode-map (kbd "C-c C-d"))
+              #'agent-ide-decline-permission))
+  (should (eq (lookup-key agent-ide-session-mode-map (kbd "C-c C-p"))
+              #'agent-ide-select-permission-option)))
+
+(ert-deftest agent-ide-session-approves-pending-permission-without-moving-point ()
+  "The approve command chooses allow-once and preserves point."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((session (agent-ide-session-mode-test--session))
+          selected)
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (let ((inhibit-message t)
+            (message-log-max nil))
+        (agent-ide-renderer-insert-permission
+         session "permission-1" "echo hi" "Command: echo hi"
+         [((kind . "allow_always")
+           (optionId . "always")
+           (name . "Always allow"))
+          ((kind . "allow_once")
+           (optionId . "once")
+           (name . "Allow"))
+          ((kind . "reject_once")
+           (optionId . "reject")
+           (name . "Reject"))]
+         (lambda (option-id) (setq selected option-id))))
+      (goto-char (point-min))
+      (let ((original-point (point)))
+        (agent-ide-approve-permission)
+        (should (= (point) original-point)))
+      (should (equal selected "once"))
+      (should-not (agent-ide-renderer-pending-permission session)))))
+
+(ert-deftest agent-ide-session-prefix-approves-permission-always ()
+  "A prefix argument chooses the always-allow option."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((session (agent-ide-session-mode-test--session))
+          selected)
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (let ((inhibit-message t)
+            (message-log-max nil))
+        (agent-ide-renderer-insert-permission
+         session "permission-1" "echo hi" "Command: echo hi"
+         [((optionId . "allow") (name . "Allow"))
+          ((optionId . "alwaysAllow") (name . "Always Allow"))]
+         (lambda (option-id) (setq selected option-id))))
+      (let ((current-prefix-arg '(4)))
+        (call-interactively #'agent-ide-approve-permission))
+      (should (equal selected "alwaysAllow")))))
+
+(ert-deftest agent-ide-session-declines-newest-pending-permission ()
+  "Decline acts on the newest request when more than one is pending."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((session (agent-ide-session-mode-test--session))
+          first-selected
+          second-selected)
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (let ((inhibit-message t)
+            (message-log-max nil))
+        (agent-ide-renderer-insert-permission
+         session "permission-1" "first" "Command: first"
+         [((kind . "reject_once")
+           (optionId . "first-reject")
+           (name . "Reject"))]
+         (lambda (option-id) (setq first-selected option-id)))
+        (agent-ide-renderer-insert-permission
+         session "permission-2" "second" "Command: second"
+         [((kind . "reject_once")
+           (optionId . "second-reject")
+           (name . "Reject"))]
+         (lambda (option-id) (setq second-selected option-id))))
+      (agent-ide-decline-permission)
+      (should-not first-selected)
+      (should (equal second-selected "second-reject")))))
+
+(ert-deftest agent-ide-session-permission-picker-can-cancel ()
+  "The permission option picker includes cancellation."
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((session (agent-ide-session-mode-test--session))
+          (selected 'not-called))
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (let ((inhibit-message t)
+            (message-log-max nil))
+        (agent-ide-renderer-insert-permission
+         session "permission-1" "echo hi" "Command: echo hi"
+         [((kind . "allow_once")
+           (optionId . "allow")
+           (name . "Allow"))]
+         (lambda (option-id) (setq selected option-id))))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args) "Cancel")))
+        (agent-ide-select-permission-option))
+      (should-not selected))))
+
 (ert-deftest agent-ide-transcript-web-search-uses-codex-style ()
   "Web search tools use the generic compact tool summary style."
   (let ((display

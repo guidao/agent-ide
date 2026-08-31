@@ -1719,25 +1719,67 @@ Prefers ACP `usage_update' `size', then legacy context-window fields."
 
 (defun agent-ide-renderer--permission-option-label (option)
   "Return a Codex-style label for permission OPTION."
-  (let* ((option-id (or (map-elt option 'optionId)
-                        (map-elt option 'id)
-                        (map-elt option 'kind)))
+  (let* ((option-id (agent-ide-renderer--permission-option-id option))
          (label (or (map-elt option 'name)
                     (map-elt option 'title)
                     option-id
                     "select"))
-         (downcase-label (downcase label)))
+         (downcase-label (downcase (format "%s" label))))
     (cond
      ((or (string= downcase-label "allow")
-          (string= option-id "allow"))
+          (equal option-id "allow"))
       "accept")
      ((or (string-match-p "always" downcase-label)
-          (string= option-id "alwaysAllow"))
+          (equal option-id "alwaysAllow"))
       label)
      ((or (string= downcase-label "reject")
-          (string= option-id "reject"))
+          (equal option-id "reject"))
       "decline")
      (t label))))
+
+(defun agent-ide-renderer--permission-option-id (option)
+  "Return OPTION's response identifier."
+  (or (map-elt option 'optionId)
+      (map-elt option 'id)
+      (map-elt option 'kind)))
+
+(defun agent-ide-renderer-pending-permission (session)
+  "Return SESSION's newest pending permission as (KEY . RECORD)."
+  (let (latest-key latest-record latest-sequence)
+    (maphash
+     (lambda (key record)
+       (when (and (plist-get record :permission)
+                  (plist-get record :pending)
+                  (or (not latest-record)
+                      (> (or (plist-get record :permission-sequence) 0)
+                         latest-sequence)))
+         (setq latest-key key
+               latest-record record
+               latest-sequence
+               (or (plist-get record :permission-sequence) 0))))
+     (agent-ide-session-tool-calls session))
+    (when latest-record
+      (cons latest-key latest-record))))
+
+(defun agent-ide-renderer-respond-permission (session key option-id)
+  "Respond to SESSION permission KEY with OPTION-ID.
+When OPTION-ID is nil, cancel the request.  Reject repeated responses."
+  (let* ((record (agent-ide-renderer--tool-record session key))
+         (respond-fn (plist-get record :respond-fn)))
+    (unless (and (plist-get record :permission)
+                 (plist-get record :pending)
+                 (functionp respond-fn))
+      (user-error "Permission request is no longer pending"))
+    ;; Mark it first so a fast repeated key press cannot answer twice.  Restore
+    ;; pending state if sending the response fails.
+    (setq record (plist-put record :pending nil))
+    (agent-ide-renderer--put-tool-record session key record)
+    (condition-case err
+        (funcall respond-fn option-id)
+      (error
+       (setq record (plist-put record :pending t))
+       (agent-ide-renderer--put-tool-record session key record)
+       (signal (car err) (cdr err))))))
 
 (defun agent-ide-renderer--insert-approval-label (label)
   "Insert approval LABEL."
@@ -1819,7 +1861,9 @@ When COLLAPSED is non-nil, hide the compact block body by default."
             (setq record (plist-put record :expanded-output expanded-output))
             (setq record (plist-put record :collapsed collapsed))
             (when (plist-get record :permission)
-              (setq record (plist-put record :pending nil)))
+              (setq record (plist-put record :pending nil))
+              (setq record (plist-put record :options nil))
+              (setq record (plist-put record :respond-fn nil)))
             (agent-ide-renderer--put-tool-record session key record))))
         (agent-ide-renderer--restore-input-point-marker restore-point)
         (agent-ide-renderer--sync-following-window-points session)
@@ -1836,7 +1880,13 @@ permission options.  RESPOND-FN receives the chosen option id."
   (with-current-buffer (agent-ide-session-buffer session)
     (let* ((insert-pos (agent-ide-renderer--insert-position session))
            (restore-point (agent-ide-renderer--input-point-marker session))
-           (record (agent-ide-renderer--tool-record session key)))
+           (record (agent-ide-renderer--tool-record session key))
+           (permission-sequence
+            (1+ (or (agent-ide--session-metadata-get
+                     session :permission-sequence)
+                    0))))
+      (agent-ide--session-metadata-put
+       session :permission-sequence permission-sequence)
       (agent-ide-renderer--maybe-save-transcript-position session insert-pos
         (agent-ide-renderer--writable
           (when (and record
@@ -1862,8 +1912,8 @@ permission options.  RESPOND-FN receives the chosen option id."
                   (insert (string-trim-right body))
                   (insert "\n\n"))))
               (dolist (option (append options nil))
-                (let* ((option-id (or (map-elt option 'optionId)
-                                      (map-elt option 'id)))
+                (let* ((option-id
+                        (agent-ide-renderer--permission-option-id option))
                        (label (agent-ide-renderer--permission-option-label
                                option)))
                   (insert-text-button
@@ -1871,14 +1921,16 @@ permission options.  RESPOND-FN receives the chosen option id."
                    'follow-link t
                    'keymap agent-ide-action-button-map
                    'action (lambda (_button)
-                             (funcall respond-fn option-id)))
+                             (agent-ide-renderer-respond-permission
+                              session key option-id)))
                   (insert "\n")))
               (insert-text-button
                "[cancel]"
                'follow-link t
                'keymap agent-ide-action-button-map
                'action (lambda (_button)
-                         (funcall respond-fn nil)))
+                         (agent-ide-renderer-respond-permission
+                          session key nil)))
               (insert "\n")
               (agent-ide-renderer--freeze-region start (point))
               (agent-ide-renderer--put-tool-record
@@ -1886,12 +1938,18 @@ permission options.  RESPOND-FN receives the chosen option id."
                                  :end (copy-marker (point) nil)
                                  :permission t
                                  :pending t
+                                 :permission-sequence permission-sequence
+                                 :options (append options nil)
+                                 :respond-fn respond-fn
                                  :title (or title "Approval"))))))
         (agent-ide-renderer--restore-input-point-marker restore-point)
         (agent-ide-renderer--sync-following-window-points session)
         (agent-ide--touch-session session)
         (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
-          (agent-ide-sidebar-on-sessions-changed)))))
+          (agent-ide-sidebar-on-sessions-changed))
+        (message
+         (concat "Approval required: C-c C-a allow; "
+                 "C-u C-c C-a always; C-c C-d decline; C-c C-p options")))))
 
 (provide 'agent-ide-renderer)
 
