@@ -83,6 +83,13 @@ PROMPT is delivered with `agent-ide-deliver-prompt'."
   :type '(alist :key-type string :value-type string)
   :group 'agent-ide)
 
+(defcustom agent-ide-header-icon-animation-interval 0.18
+  "Seconds between rotations of the Agent IDE icon in session headers.
+Set this to nil or zero to keep the icon stationary."
+  :type '(choice (const :tag "Do not animate" nil)
+                 (number :tag "Seconds"))
+  :group 'agent-ide)
+
 ;;;###autoload
 (defcustom agent-ide-model nil
   "Default model ID set after session creation via `session/set_model'.

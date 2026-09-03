@@ -108,7 +108,7 @@ On the response viewport:
 
 ### Header line
 
-The header shows: **model name** · **project directory** · **context usage** / **last-turn tokens**.
+The header shows: an animated Agent IDE icon · **model name** · **project directory** · **context usage** / **last-turn tokens**.  The transparent PNG is cached in four rotated frames for lightweight animation.
 
 ### Transcript features
 
@@ -148,6 +148,7 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-mcp-servers` | `[]` | MCP servers passed to `session/new` |
 | `agent-ide-prompt-placeholder-text` | `"Tell Agent what to do..."` | Empty-prompt placeholder |
 | `agent-ide-running-placeholder-text` | `"Working..."` | Placeholder while the agent processes |
+| `agent-ide-header-icon-animation-interval` | `0.18` | Seconds between rotations of the Agent IDE header icon; `nil` disables animation |
 | `agent-ide-sidebar-width` | `0.14` | Left side-window width |
 | `agent-ide-sidebar-auto-show` | `nil` | Auto-show on session create when enabled; ignored for refresh while user-dismissed |
 | `agent-ide-sidebar-confirm-kill` | `t` | Confirm before kill |

@@ -10,12 +10,17 @@
 (require 'button)
 (require 'cl-lib)
 (require 'color)
+(require 'image)
 (require 'map)
 (require 'seq)
 (require 'subr-x)
 (require 'thingatpt)
 (require 'url-parse)
 (require 'agent-ide-core)
+
+(defconst agent-ide-renderer--directory
+  (file-name-directory (or load-file-name buffer-file-name default-directory))
+  "Directory containing Agent IDE renderer assets.")
 
 (defface agent-ide-header-face
   '((t :inherit font-lock-keyword-face :weight bold))
@@ -25,6 +30,11 @@
 (defface agent-ide-header-model-face
   '((t :inherit bold :foreground "#61AFEF"))
   "Face for model name in the header line."
+  :group 'agent-ide)
+
+(defface agent-ide-header-icon-face
+  '((t :inherit agent-ide-header-model-face :weight bold))
+  "Face for the text fallback of the animated Agent IDE header icon."
   :group 'agent-ide)
 
 (defface agent-ide-header-dir-face
@@ -154,6 +164,20 @@
 (defvar agent-ide-placeholder-ellipsis-animation-interval 0.5
   "Seconds between animated trailing ellipsis frames in busy prompt help.
 When nil or zero, busy prompt help displays its text unchanged.")
+
+(defvar agent-ide-header-icon-animation-interval 0.18
+  "Seconds between rotations of the Agent IDE icon in the session header.
+When nil or zero, the icon is displayed without animation.")
+
+(defvar agent-ide-renderer--header-icon-frame 0
+  "Current rotation frame for the Emacs session header icon.")
+
+(defvar agent-ide-renderer--header-icon-timer nil
+  "Shared timer used to animate Agent IDE icons in session headers.")
+
+(defvar agent-ide-renderer--header-icon-images nil
+  "Cached image specifications for Agent IDE icon rotation frames.")
+
 
 (defvar agent-ide-status-placeholder-text-alist
   '(("interrupting" . "Interrupting...")
@@ -1295,15 +1319,92 @@ Prefers ACP `usage_update' `size', then legacy context-window fields."
         (string-join (nreverse parts) sep)
       (propertize "Agent" 'face 'agent-ide-header-model-face))))
 
-(defun agent-ide-renderer-update-header (session)
-  "Update SESSION header line."
+(defun agent-ide-renderer--header-icon-file ()
+  "Return the Agent IDE icon asset file, when available."
+  (let ((file (expand-file-name
+               "assets/agent-ide-icon.png"
+               agent-ide-renderer--directory)))
+    (and (file-readable-p file) file)))
+
+(defun agent-ide-renderer--header-icon-image ()
+  "Return the cached PNG specification for the current rotation frame."
+  (when (and (display-images-p)
+             (image-type-available-p 'png))
+    (unless (and (vectorp agent-ide-renderer--header-icon-images)
+                 (= (length agent-ide-renderer--header-icon-images) 4))
+      (setq agent-ide-renderer--header-icon-images (make-vector 4 nil)))
+    (let* ((index (mod agent-ide-renderer--header-icon-frame 4))
+           (cached (aref agent-ide-renderer--header-icon-images index)))
+      (or cached
+          (when-let* ((file (agent-ide-renderer--header-icon-file)))
+            (let ((image (create-image
+                          file 'png nil
+                          :height 16
+                          :ascent 'center
+                          :rotation (* index 90))))
+              (aset agent-ide-renderer--header-icon-images index image)
+              image))))))
+
+(defun agent-ide-renderer--header-icon-string ()
+  "Return the animated Agent IDE icon as a display string.
+Use a compact text fallback in terminals and builds without PNG support."
+  (if-let* ((image (agent-ide-renderer--header-icon-image)))
+      (propertize " " 'display image 'help-echo "Agent IDE")
+    (propertize "A" 'face 'agent-ide-header-icon-face 'help-echo "Agent IDE")))
+
+(defun agent-ide-renderer--header-line-content (session)
+  "Return the complete header line content for SESSION."
+  (concat (agent-ide-renderer--header-icon-string)
+          " "
+          (agent-ide-renderer--header-summary session)))
+
+(defun agent-ide-renderer--set-header-line (session)
+  "Set SESSION's header line using the current icon animation frame."
   (when-let* ((buffer (agent-ide-session-buffer session)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (setq header-line-format
-              (concat " " (agent-ide-renderer--header-summary session)))
-        (force-mode-line-update t)
+              (concat " " (agent-ide-renderer--header-line-content session)))
+        (force-mode-line-update)))))
+
+(defun agent-ide-renderer--stop-header-icon-animation ()
+  "Stop the shared session header icon animation timer."
+  (when (timerp agent-ide-renderer--header-icon-timer)
+    (cancel-timer agent-ide-renderer--header-icon-timer))
+  (setq agent-ide-renderer--header-icon-timer nil))
+
+(defun agent-ide-renderer--advance-header-icon ()
+  "Advance and redraw the Agent IDE icon in every live session header."
+  (setq agent-ide-renderer--header-icon-frame
+        (mod (1+ agent-ide-renderer--header-icon-frame) 4))
+  (let ((has-live-session nil))
+    (dolist (session agent-ide--sessions)
+      (when (agent-ide--session-live-p session)
+        (setq has-live-session t)
+        (agent-ide-renderer--set-header-line session)))
+    (unless has-live-session
+      (agent-ide-renderer--stop-header-icon-animation))))
+
+(defun agent-ide-renderer--ensure-header-icon-animation ()
+  "Start the shared session header icon animation timer when appropriate."
+  (if (and (display-images-p)
+           (numberp agent-ide-header-icon-animation-interval)
+           (> agent-ide-header-icon-animation-interval 0))
+      (unless (timerp agent-ide-renderer--header-icon-timer)
+        (setq agent-ide-renderer--header-icon-timer
+              (run-at-time agent-ide-header-icon-animation-interval
+                           agent-ide-header-icon-animation-interval
+                           #'agent-ide-renderer--advance-header-icon)))
+    (agent-ide-renderer--stop-header-icon-animation)))
+
+(defun agent-ide-renderer-update-header (session)
+  "Update SESSION header line."
+  (when-let* ((buffer (agent-ide-session-buffer session)))
+    (when (buffer-live-p buffer)
+      (agent-ide-renderer--set-header-line session)
+      (with-current-buffer buffer
         (agent-ide-renderer-refresh-placeholder session))
+      (agent-ide-renderer--ensure-header-icon-animation)
       (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
         (agent-ide-sidebar-on-sessions-changed)))))
 
