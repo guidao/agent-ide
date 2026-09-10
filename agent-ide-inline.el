@@ -129,8 +129,8 @@ Strict directory match; start a new session when none matches."
   (cond
    ((agent-ide-inline--ready-p session)
     (agent-ide-protocol-send-prompt session prompt))
-   ((equal (agent-ide-session-status session) "failed")
-    (agent-ide-inline--on-failure session "agent session failed"))
+   ((member (agent-ide-session-status session) '("failed" "disconnected"))
+    (agent-ide-inline--on-failure session "Session disconnected; use agent-ide-resume"))
    ((time-less-p deadline (current-time))
     (agent-ide-inline--on-failure session "timed out waiting for agent"))
    (t
@@ -333,6 +333,9 @@ Interactively, SPC continues cycling and C-g clears."
       (user-error "Empty prompt"))
     (when (equal (agent-ide-session-status session) "running")
       (user-error "Agent busy: interrupt the running turn first"))
+    (when (member (agent-ide-session-status session) '("disconnected" "failed" "resuming"))
+      (user-error "Session is %s; use agent-ide-resume and wait until ready"
+                  (agent-ide-session-status session)))
     (let* ((origin agent-ide-inline--origin)
            (reference (agent-ide-inline--reference-text
                        agent-ide-inline--reference-ov))
@@ -402,6 +405,8 @@ the reference context (region, line, defun, window, buffer)."
     (with-current-buffer src
       (text-mode)
       (valign-mode 1)
+      (add-hook 'agent-ide-latex-updated-functions
+                (lambda () (agent-ide-inline--response-overlay-render ov)) nil t)
       (buffer-disable-undo))
     (overlay-put ov 'agent-ide-inline
                  (list :session session

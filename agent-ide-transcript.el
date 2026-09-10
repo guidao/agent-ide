@@ -673,17 +673,76 @@ ACP `tool_call_update' events report arguments in their `title' field."
 
 (defun agent-ide-transcript-handle-notification (session notification)
   "Handle ACP NOTIFICATION for SESSION."
+  (let ((id (agent-ide--get-in notification '(params sessionId))))
+    (unless (and id (agent-ide-session-acp-session-id session)
+                 (not (equal id (agent-ide-session-acp-session-id session))))
+      (if (and (equal (map-elt notification 'method) "session/update")
+               (agent-ide--session-metadata-get session :loading-history))
+          (agent-ide--session-metadata-put
+           session :replay-notifications
+           (cons notification (agent-ide--session-metadata-get session :replay-notifications)))
+        (agent-ide-transcript--render-notification session notification)))))
+
+(defun agent-ide-transcript-replay (session notifications)
+  "Replace SESSION history with NOTIFICATIONS, preserving its editable draft.
+Called only after a successful load.  Historical messages never run live hooks."
+  (let ((draft (agent-ide-renderer-current-input session t)))
+    (with-current-buffer (agent-ide-session-buffer session)
+      (when (agent-ide-renderer-input-active-p session)
+        (agent-ide-renderer-freeze-current-input session))
+      (remove-overlays)
+      (agent-ide-renderer-reset-stream session)
+      (setf (agent-ide-session-tool-calls session) (make-hash-table :test 'equal)
+            (agent-ide-session-prompt-history session) nil
+            (agent-ide-session-prompt-history-index session) nil
+            (agent-ide-session-usage session) nil)
+      (agent-ide-renderer-initialize-buffer session)
+      (agent-ide--session-metadata-put session :replaying t)
+      (agent-ide--session-metadata-put session :replay-last-kind nil)
+      (agent-ide--session-metadata-put session :replay-last-id nil)
+      (unwind-protect
+          (dolist (notification notifications)
+            (agent-ide-transcript--render-notification session notification))
+        (agent-ide--session-metadata-put session :replaying nil)
+        (agent-ide-renderer-finish-stream session)
+        (agent-ide-renderer-reset-stream session)
+        (agent-ide-renderer-create-prompt session t)
+        (agent-ide-renderer-replace-current-input session draft))
+      (agent-ide--session-metadata-put session :has-transcript t))))
+
+(defun agent-ide-transcript--render-notification (session notification)
+  "Render NOTIFICATION for SESSION without queueing history replay."
   (pcase (map-elt notification 'method)
     ("session/update"
      (let* ((update (agent-ide--get-in notification '(params update)))
-            (kind (map-elt update 'sessionUpdate)))
+            (kind (map-elt update 'sessionUpdate))
+            (id (map-elt update 'messageId))
+            (replaying (agent-ide--session-metadata-get session :replaying))
+            (new-message
+             (or (not (equal kind (agent-ide--session-metadata-get session :replay-last-kind)))
+                 (and id (not (equal id (agent-ide--session-metadata-get session :replay-last-id)))))))
+       (when (and replaying new-message)
+         (agent-ide-renderer-finish-stream session)
+         (agent-ide-renderer-reset-stream session))
+       (agent-ide--session-metadata-put session :replay-last-kind kind)
+       (agent-ide--session-metadata-put session :replay-last-id id)
        (pcase kind
+         ("user_message_chunk"
+          (let ((text (agent-ide-transcript--content-text (map-elt update 'content))))
+            (agent-ide-renderer-append-stream-chunk session 'user text)
+            (when replaying
+              (if new-message
+                  (push text (agent-ide-session-prompt-history session))
+                (setcar (agent-ide-session-prompt-history session)
+                        (concat (car (agent-ide-session-prompt-history session)) text))))))
          ("agent_message_chunk"
           (let ((text (agent-ide-transcript--content-text
                        (map-elt update 'content))))
             (agent-ide-renderer-append-stream-chunk session 'message text)
-            (run-hook-with-args 'agent-ide-message-chunk-functions
-                                session text)))
+            (agent-ide--session-metadata-put session :has-transcript t)
+            (unless replaying
+              (run-hook-with-args 'agent-ide-message-chunk-functions
+                                 session text))))
          ("agent_thought_chunk"
           (agent-ide-renderer-append-stream-chunk
            session
@@ -749,7 +808,11 @@ ACP `tool_call_update' events report arguments in their `title' field."
   (let* ((tool-call (agent-ide--get-in request '(params toolCall)))
          (tool-id (or (map-elt tool-call 'toolCallId)
                       (format "permission-%s" (map-elt request 'id))))
-         (key (format "permission-%s" tool-id))
+         ;; A backend may reuse tool IDs after reconnecting.  Old buttons must
+         ;; never resolve a new connection's request with the same tool ID.
+         (key (format "permission-%s-%s"
+                      (or (agent-ide--session-metadata-get session :connection-generation) 0)
+                      tool-id))
          (request-id (map-elt request 'id))
          (title (agent-ide-transcript--tool-title tool-call))
          (body (agent-ide-transcript--tool-body tool-call))

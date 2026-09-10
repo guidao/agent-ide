@@ -11,13 +11,18 @@
 (require 'map)
 (require 'subr-x)
 (require 'agent-ide-core)
+(require 'agent-ide-history)
 (require 'agent-ide-renderer)
+
+(declare-function agent-ide--watch-client "agent-ide-session" (session))
+(declare-function agent-ide--restore-failed "agent-ide-session" (session error))
+(declare-function agent-ide-transcript-replay "agent-ide-transcript" (session notifications))
 
 (defvar agent-ide-text-file-capabilities t
   "Whether Agent IDE advertises ACP text-file capabilities.")
 
 (defvar agent-ide-mcp-servers []
-  "ACP MCP servers passed to `session/new'.")
+  "ACP MCP servers passed to session creation and restoration.")
 
 (defvar agent-ide-model nil
   "Default model ID applied after session creation.
@@ -53,22 +58,33 @@ Called with (SESSION ERROR) after status is set to idle.")
     (session request &key on-success on-failure)
   "Send ACP REQUEST for SESSION."
   (agent-ide-protocol--track-request session request)
-  (acp-send-request
-   :client (agent-ide-session-client session)
-   :request request
-   :buffer (agent-ide-session-buffer session)
-   :on-success (lambda (response)
-                 (agent-ide-protocol--untrack-request session request)
-                 (when on-success
-                   (funcall on-success response)))
-   :on-failure (lambda (error &optional _raw)
-                 (agent-ide-protocol--untrack-request session request)
-                 (if on-failure
-                     (funcall on-failure error)
-                   (agent-ide-renderer-append-error
-                    session
-                    (or (map-elt error 'message)
-                        (format "%S" error)))))))
+  (let* ((client (agent-ide-session-client session))
+         (current-p (lambda ()
+                      (and (eq client (agent-ide-session-client session))
+                           (buffer-live-p (agent-ide-session-buffer session)))))
+         (failure
+          (lambda (error &optional _raw)
+            (when (funcall current-p)
+              (agent-ide-protocol--untrack-request session request)
+              (if on-failure
+                  (funcall on-failure error)
+                (agent-ide-renderer-append-error
+                 session (or (map-elt error 'message) (format "%S" error))))))))
+    (condition-case err
+        (with-current-buffer (agent-ide-session-buffer session)
+          (acp-send-request
+	   :client client
+	   :request request
+	   :buffer (agent-ide-session-buffer session)
+	   :on-success (lambda (response)
+			 (when (funcall current-p)
+			   (agent-ide-protocol--untrack-request session request)
+			   (when on-success
+			     (funcall on-success response))))
+	   :on-failure failure)
+          (when (fboundp 'agent-ide--watch-client)
+            (agent-ide--watch-client session)))
+      (error (funcall failure `((message . ,(error-message-string err))))))))
 
 (defun agent-ide-protocol-initialize (session on-ready)
   "Initialize ACP client for SESSION, then call ON-READY."
@@ -89,18 +105,19 @@ Called with (SESSION ERROR) after status is set to idle.")
                  (agent-ide-renderer-append-status session "ACP initialized.")
                  (funcall on-ready))
    :on-failure (lambda (error)
-                 (agent-ide--set-status session "failed")
-                 (agent-ide-renderer-update-header session)
-                 (agent-ide-renderer-append-error
-                  session
-                  (or (map-elt error 'message)
-                      (format "%S" error))))))
+                 (if (agent-ide--session-metadata-get session :restoring)
+                     (agent-ide--restore-failed session error)
+                   (agent-ide--set-status session "failed")
+                   (agent-ide-renderer-update-header session)
+                   (agent-ide-renderer-append-error
+                    session
+                    (or (map-elt error 'message)
+			(format "%S" error)))))))
 
 (defun agent-ide-protocol-set-model (session model-id &optional silent)
   "Send `session/set_model' for SESSION with MODEL-ID.
 When SILENT is non-nil, suppress status messages."
-  (unless (agent-ide-session-acp-session-id session)
-    (user-error "Agent session is not ready"))
+  (agent-ide--assert-ready session)
   (agent-ide-protocol-send-request
    session
    (acp-make-session-set-model-request
@@ -135,7 +152,8 @@ When SILENT is non-nil, suppress status messages."
    session
    (acp-make-session-new-request
     :cwd (agent-ide-session-directory session)
-    :mcp-servers agent-ide-mcp-servers)
+    :mcp-servers (or (agent-ide--session-metadata-get session :mcp-servers)
+                     agent-ide-mcp-servers))
    :on-success (lambda (response)
                  (setf (agent-ide-session-acp-session-id session)
                        (map-elt response 'sessionId))
@@ -144,6 +162,7 @@ When SILENT is non-nil, suppress status messages."
                  (setf (agent-ide-session-models session)
                        (map-elt response 'models))
                  (agent-ide--set-status session "idle")
+                 (agent-ide-history-record session)
                  (agent-ide-renderer-update-header session)
                  (agent-ide-renderer-append-status session "Ready.")
                  (agent-ide-renderer-create-prompt session)
@@ -159,6 +178,57 @@ When SILENT is non-nil, suppress status messages."
                   (or (map-elt error 'message)
                       (format "%S" error))))))
 
+(defun agent-ide-protocol-restore-session (session)
+  "Restore SESSION using the capabilities of its initialized backend."
+  (let* ((caps (agent-ide-session-capabilities session))
+         ;; Empty JSON objects decode to nil in acp.el.  Test key presence.
+         (resume (map-contains-key (map-elt caps 'sessionCapabilities) 'resume))
+         (load-session (eq t (map-elt caps 'loadSession)))
+         (has-transcript (agent-ide--session-metadata-get session :has-transcript))
+         (method (cond ((and resume has-transcript) "session/resume")
+                       (load-session "session/load")
+                       (resume "session/resume"))))
+    (if (not method)
+        (agent-ide--restore-failed
+         session '((message . "This backend supports neither resume nor load")))
+      (agent-ide--set-status session "resuming")
+      (agent-ide--session-metadata-put session :loading-history (equal method "session/load"))
+      (agent-ide--session-metadata-put session :replay-notifications nil)
+      (agent-ide-protocol-send-request
+       session
+       ;; Use the common request format also supported by older acp.el versions.
+       `((:method . ,method)
+         (:params . ((sessionId . ,(agent-ide-session-acp-session-id session))
+                     (cwd . ,(directory-file-name (agent-ide-session-directory session)))
+                     (mcpServers . ,(or (agent-ide--session-metadata-get session :mcp-servers)
+					agent-ide-mcp-servers)))))
+       :on-success
+       (lambda (response)
+         (when (agent-ide--session-metadata-get session :loading-history)
+           (agent-ide-transcript-replay
+            session (nreverse (agent-ide--session-metadata-get session :replay-notifications))))
+         (agent-ide--session-metadata-put session :loading-history nil)
+         (agent-ide--session-metadata-put session :replay-notifications nil)
+         (agent-ide--session-metadata-put session :restoring nil)
+         (when (map-contains-key response 'configOptions)
+           (agent-ide--session-metadata-put session :config-options
+                                            (map-elt response 'configOptions)))
+         (dolist (key '(modes models))
+           (when (map-contains-key response key)
+             (if (eq key 'modes)
+                 (setf (agent-ide-session-modes session) (map-elt response key))
+               (setf (agent-ide-session-models session) (map-elt response key)))))
+         (agent-ide--set-status session "idle")
+         (agent-ide-renderer-update-header session)
+         (agent-ide-renderer-append-status
+          session (if (and (equal method "session/resume") (not has-transcript))
+                      "Session restored. Earlier messages are not loaded; you can continue chatting."
+                    "Session restored."))
+         (unless (agent-ide-renderer-input-active-p session)
+           (agent-ide-renderer-create-prompt session))
+         (agent-ide-history-record session))
+       :on-failure (lambda (error) (agent-ide--restore-failed session error))))))
+
 (defun agent-ide-protocol--prompt-content (prompt)
   "Return ACP content blocks for PROMPT."
   (vector `((type . "text")
@@ -166,8 +236,9 @@ When SILENT is non-nil, suppress status messages."
 
 (defun agent-ide-protocol-send-prompt (session prompt)
   "Send PROMPT to SESSION."
-  (unless (agent-ide-session-acp-session-id session)
-    (user-error "Agent session is not ready"))
+  (agent-ide--assert-ready session)
+  (agent-ide-history-record session prompt)
+  (agent-ide--session-metadata-put session :has-transcript t)
   (agent-ide--set-status session "running")
   (agent-ide-renderer-update-header session)
   (agent-ide-renderer-reset-stream session)
@@ -182,6 +253,7 @@ When SILENT is non-nil, suppress status messages."
                  (agent-ide-renderer-finish-stream session)
                  (agent-ide-renderer-reset-stream session)
                  (agent-ide--set-status session "idle")
+                 (agent-ide-history-record session)
                  (agent-ide-renderer-update-header session)
                  (agent-ide-renderer-follow-input session)
                  (when-let* ((stop-reason (map-elt response 'stopReason)))
@@ -207,6 +279,9 @@ When SILENT is non-nil, suppress status messages."
   "Cancel active turn for SESSION."
   (unless (agent-ide-session-acp-session-id session)
     (user-error "No active agent ACP session"))
+  (when (member (agent-ide-session-status session)
+                '("disconnected" "resuming" "initializing" "failed"))
+    (user-error "No active turn to cancel"))
   (acp-send-notification
    :client (agent-ide-session-client session)
    :notification (acp-make-session-cancel-notification

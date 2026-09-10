@@ -17,6 +17,7 @@
 (require 'thingatpt)
 (require 'url-parse)
 (require 'agent-ide-core)
+(require 'agent-ide-latex)
 
 (defconst agent-ide-renderer--directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
@@ -182,6 +183,8 @@ When nil or zero, the icon is displayed without animation.")
 (defvar agent-ide-status-placeholder-text-alist
   '(("interrupting" . "Interrupting...")
     ("creating-session" . "Creating session...")
+    ("resuming" . "Restoring session...")
+    ("disconnected" . "Disconnected — C-c C-z to resume")
     ("initializing" . "Initializing..."))
   "Alist mapping Agent IDE statuses to prompt placeholder text.")
 
@@ -760,15 +763,9 @@ highlighting and fixed-pitch text, matching the codex-ide transcript style."
             (goto-char closing-end)))))))
 
 (defun agent-ide-renderer--markdown-code-content-p (start end)
-  "Return non-nil when START..END overlaps rendered fenced code content."
-  (let ((pos start)
-        found)
-    (while (and (< pos end) (not found))
-      (setq found (get-text-property pos 'agent-ide-markdown-code-content))
-      (setq pos (or (next-single-property-change
-                     pos 'agent-ide-markdown-code-content nil end)
-                    end)))
-    found))
+  "Return non-nil when START..END overlaps code or math source."
+  (or (text-property-not-all start end 'agent-ide-markdown-code-content nil)
+      (text-property-not-all start end 'agent-ide-latex nil)))
 
 (defun agent-ide-renderer--render-markdown-inline-pattern
     (start end pattern face &optional delimiter-groups)
@@ -917,7 +914,8 @@ Lines matching the Codex tool-body pattern `  $ ...' get muted."
   "Apply lightweight Markdown rendering in START..END.
 Table alignment is handled by `valign-mode'."
   (when (< start end)
-    (let ((end-marker (copy-marker end t)))
+    (let ((end-marker (copy-marker end t))
+          (formulas (agent-ide-latex-prepare start end)))
       (agent-ide-renderer-fontify-code-fences start (marker-position end-marker))
       (agent-ide-renderer--render-markdown-headings start (marker-position end-marker))
       (agent-ide-renderer--render-command-lines start (marker-position end-marker))
@@ -934,6 +932,7 @@ Table alignment is handled by `valign-mode'."
         (condition-case nil
             (valign-region start (marker-position end-marker))
           (error nil)))
+      (agent-ide-latex-render formulas)
       (set-marker end-marker nil))))
 
 (cl-defun agent-ide-renderer--insert-foldable-block
@@ -1663,14 +1662,15 @@ Use a compact text fallback in terminals and builds without PNG support."
          (eq (marker-buffer start) buffer)
          (eq (marker-buffer end) buffer))))
 
-(defun agent-ide-renderer-current-input (session)
-  "Return SESSION current prompt text."
+(defun agent-ide-renderer-current-input (session &optional verbatim)
+  "Return SESSION current prompt text.
+When VERBATIM is non-nil, preserve trailing whitespace for draft restoration."
   (with-current-buffer (agent-ide-session-buffer session)
     (let ((start (agent-ide-session-input-start-marker session))
           (end (agent-ide-session-input-end-marker session)))
       (if (and (markerp start) (marker-buffer start)
                (markerp end) (marker-buffer end))
-          (string-trim-right
+          (funcall (if verbatim #'identity #'string-trim-right)
            (buffer-substring-no-properties
             (marker-position start)
             (marker-position end)))
@@ -1719,6 +1719,7 @@ Use a compact text fallback in terminals and builds without PNG support."
   (pcase kind
     ('thought "Thinking")
     ('message "Assistant")
+    ('user "User")
     (_ "Agent")))
 
 (defun agent-ide-renderer-append-stream-chunk (session kind text)

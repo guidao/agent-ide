@@ -78,6 +78,8 @@ PROMPT is delivered with `agent-ide-deliver-prompt'."
 (defcustom agent-ide-status-placeholder-text-alist
   '(("interrupting" . "Interrupting...")
     ("creating-session" . "Creating session...")
+    ("resuming" . "Restoring session...")
+    ("disconnected" . "Disconnected — C-c C-z to resume")
     ("initializing" . "Initializing..."))
   "Alist mapping Agent IDE statuses to prompt placeholder text."
   :type '(alist :key-type string :value-type string)
@@ -101,7 +103,7 @@ is created.  Use `agent-ide-set-model' to switch models interactively."
 
 ;;;###autoload
 (defcustom agent-ide-mcp-servers []
-  "ACP MCP servers passed to `session/new'."
+  "ACP MCP servers passed to session creation and restoration."
   :type 'sexp
   :group 'agent-ide)
 

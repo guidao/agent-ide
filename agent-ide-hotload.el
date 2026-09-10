@@ -18,9 +18,11 @@
   :type 'directory
   :group 'agent-ide-hotload)
 
-(defvar agent-ide-hotload--files
+(defconst agent-ide-hotload--files
   '("agent-ide-core.el"
+    "agent-ide-history.el"
     "agent-ide-protocol.el"
+    "agent-ide-latex.el"
     "agent-ide-renderer.el"
     "agent-ide-session-mode.el"
     "agent-ide-session.el"

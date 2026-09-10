@@ -479,6 +479,26 @@ not the buffer the command happens to run in (the prompt window)."
 
 ;;; Turn-end finalization
 
+(ert-deftest agent-ide-inline-formula-completion-refreshes-viewport ()
+  (with-temp-buffer
+    (insert "origin\n")
+    (let* ((session (agent-ide-inline-test--session))
+           (ov (agent-ide-inline--response-overlay-create session (current-buffer) 1))
+           (src (plist-get (overlay-get ov 'agent-ide-inline) :src))
+           (image '(image :type svg :data "test")))
+      (unwind-protect
+          (let ((agent-ide-latex-preview nil))
+            (agent-ide-inline--response-overlay-append-chunk ov "$x$")
+            (with-current-buffer src
+              (put-text-property 1 4 'agent-ide-latex-key "key")
+              (agent-ide-latex--apply
+               (list (copy-marker 1) (copy-marker 4) "$x$" "key") image nil))
+            (let* ((text (overlay-get ov 'after-string))
+                   (start (string-match (regexp-quote "$x$") text)))
+              (should start)
+              (should (equal (get-text-property start 'display text) image))))
+        (agent-ide-inline-clear-response-overlay ov)))))
+
 (ert-deftest agent-ide-inline-response-marks-done ()
   (with-temp-buffer
     (insert "origin\n")

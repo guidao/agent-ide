@@ -11,6 +11,7 @@
 (require 'map)
 (require 'subr-x)
 (require 'agent-ide-core)
+(require 'agent-ide-history)
 (require 'agent-ide-protocol)
 (require 'agent-ide-renderer)
 (require 'agent-ide-session-mode)
@@ -35,13 +36,15 @@ Allowed values are nil, `vertical', and `horizontal'.")
 
 (defun agent-ide--make-client (session)
   "Create an ACP client for SESSION."
-  (unless agent-ide-command
-    (error "`agent-ide-command' is empty"))
-  (acp-make-client
-   :context-buffer (agent-ide-session-buffer session)
-   :command (car agent-ide-command)
-   :command-params (cdr agent-ide-command)
-   :environment-variables agent-ide-environment))
+  (let ((command (or (agent-ide--session-metadata-get session :command)
+                     agent-ide-command)))
+    (unless command
+      (error "`agent-ide-command' is empty"))
+    (acp-make-client
+     :context-buffer (agent-ide-session-buffer session)
+     :command (car command)
+     :command-params (cdr command)
+     :environment-variables (agent-ide--session-metadata-get session :environment))))
 
 (defun agent-ide--subscribe-client (session)
   "Subscribe SESSION to ACP client events."
@@ -51,18 +54,83 @@ Allowed values are nil, `vertical', and `horizontal'.")
      :client client
      :buffer buffer
      :on-notification (lambda (notification)
-                        (agent-ide-transcript-handle-notification
-                         session notification)))
+                        (when (eq client (agent-ide-session-client session))
+                          (agent-ide-transcript-handle-notification
+                           session notification))))
     (acp-subscribe-to-requests
      :client client
      :buffer buffer
      :on-request (lambda (request)
-                   (agent-ide-transcript-handle-request session request)))
+                   (when (eq client (agent-ide-session-client session))
+                     (agent-ide-transcript-handle-request session request))))
     (acp-subscribe-to-errors
      :client client
      :buffer buffer
      :on-error (lambda (error)
-                 (agent-ide-transcript-handle-error session error)))))
+                 (when (eq client (agent-ide-session-client session))
+                   (agent-ide-transcript-handle-error session error))))))
+
+(defun agent-ide--invalidate-connection (session)
+  "Invalidate pending requests and old permission actions in SESSION."
+  (agent-ide--session-metadata-put
+   session :connection-generation
+   (1+ (or (agent-ide--session-metadata-get session :connection-generation) 0)))
+  (setf (agent-ide-session-initialized session) nil
+        (agent-ide-session-active-requests session) nil)
+  (maphash
+   (lambda (key record)
+     (when (plist-get record :permission)
+       (setq record (plist-put record :pending nil))
+       (setq record (plist-put record :respond-fn nil)))
+     (when (member (plist-get record :status) '("pending" "in_progress" "in-progress" "running"))
+       (setq record (plist-put record :status "disconnected")))
+     (puthash key record (agent-ide-session-tool-calls session)))
+   (agent-ide-session-tool-calls session))
+  (agent-ide-renderer-reset-stream session))
+
+(defun agent-ide--watch-client (session)
+  "Observe SESSION process exit without replacing ACP's own exit handling."
+  (let* ((client (agent-ide-session-client session))
+         (process (map-elt client :process)))
+    (when (and (processp process) (not (process-get process 'agent-ide-watched)))
+      (process-put process 'agent-ide-watched t)
+      (let ((previous (process-sentinel process)))
+        (set-process-sentinel
+         process
+         (lambda (proc event)
+           (unwind-protect
+               (when previous (funcall previous proc event))
+             (when (and (memq (process-status proc) '(exit signal closed failed))
+                        (eq client (agent-ide-session-client session))
+                        (buffer-live-p (agent-ide-session-buffer session)))
+               (agent-ide--invalidate-connection session)
+               (agent-ide--restore-failed
+                session `((message . ,(format "Agent disconnected: %s" (string-trim event)))))))))))))
+
+(defun agent-ide--restore-failed (session error)
+  "Leave SESSION available for retry after restoration or connection ERROR."
+  (agent-ide--session-metadata-put session :restoring nil)
+  (agent-ide--session-metadata-put session :loading-history nil)
+  (agent-ide--session-metadata-put session :replay-notifications nil)
+  (agent-ide--set-status session "disconnected")
+  (agent-ide-renderer-update-header session)
+  (agent-ide-renderer-append-error
+   session (or (map-elt error 'message) (format "%S" error)))
+  (unless (agent-ide-renderer-input-active-p session)
+    (agent-ide-renderer-create-prompt session))
+  (agent-ide-renderer--with-insertion-point
+   session
+   (lambda ()
+     (dolist (action `(("Retry" . ,(lambda () (agent-ide--resume-session session)))
+                       ("Choose session" . ,(lambda () (agent-ide-resume-history)))
+                       ("New session" . ,(lambda ()
+                                           (agent-ide-new-session
+                                            (agent-ide-session-directory session))))))
+       (let ((fn (cdr action)))
+         (insert-text-button (car action) 'follow-link t
+                             'action (lambda (_button) (funcall fn)))
+         (insert "  ")))
+     (insert "\n"))))
 
 (defun agent-ide--display-buffer (buffer)
   "Display Agent IDE BUFFER."
@@ -89,6 +157,8 @@ Allowed values are nil, `vertical', and `horizontal'.")
   "Stop and remove SESSION."
   (when (agent-ide-session-p session)
     (when-let* ((client (agent-ide-session-client session)))
+      ;; Late callbacks from shutdown must not modify the buffer or metadata.
+      (setf (agent-ide-session-client session) nil)
       (ignore-errors
         (acp-shutdown :client client)))
     (remhash session agent-ide--session-metadata)
@@ -110,8 +180,9 @@ Allowed values are nil, `vertical', and `horizontal'.")
 
 (add-hook 'kill-emacs-hook #'agent-ide--cleanup-all-sessions)
 
-(defun agent-ide--create-session (&optional directory)
-  "Create a Agent IDE session for DIRECTORY."
+(defun agent-ide--create-session (&optional directory defer-client)
+  "Create an Agent IDE session for DIRECTORY.
+When DEFER-CLIENT is non-nil, restoration will create the ACP client later."
   (let* ((working-dir (file-name-as-directory
                        (expand-file-name
                         (or directory (agent-ide--working-directory)))))
@@ -125,15 +196,19 @@ Allowed values are nil, `vertical', and `horizontal'.")
                    :tool-calls (make-hash-table :test 'equal)
                    :prompt-history nil
                    :prompt-history-index nil)))
+    (agent-ide--session-metadata-put session :command (copy-tree agent-ide-command))
+    (agent-ide--session-metadata-put session :environment (copy-tree agent-ide-environment))
+    (agent-ide--session-metadata-put session :mcp-servers (copy-tree agent-ide-mcp-servers t))
     (with-current-buffer buffer
       (agent-ide-session-mode)
       (setq-local default-directory working-dir)
       (setq-local agent-ide--session session)
       (add-hook 'kill-buffer-hook #'agent-ide--handle-buffer-killed nil t)
       (agent-ide-renderer-initialize-buffer session))
-    (setf (agent-ide-session-client session)
-          (agent-ide--make-client session))
-    (agent-ide--subscribe-client session)
+    (unless defer-client
+      (setf (agent-ide-session-client session)
+            (agent-ide--make-client session))
+      (agent-ide--subscribe-client session))
     (push session agent-ide--sessions)
     (agent-ide--touch-session session)
     (agent-ide-renderer--ensure-header-icon-animation)
@@ -188,8 +263,7 @@ Creates a fresh editable prompt.  Does not send to the agent."
 
 (defun agent-ide-deliver-prompt (session prompt)
   "Freeze PROMPT as a user line in SESSION and send it via ACP."
-  (unless (agent-ide-session-acp-session-id session)
-    (user-error "Agent session is not ready"))
+  (agent-ide--assert-ready session)
   (agent-ide-freeze-user-prompt session prompt)
   (agent-ide-protocol-send-prompt session prompt))
 
@@ -200,6 +274,7 @@ Creates a fresh editable prompt.  Does not send to the agent."
   (let* ((session (or (agent-ide--session-for-buffer)
                       (user-error "No Agent IDE session")))
          (prompt (agent-ide-renderer-current-input session)))
+    (agent-ide--assert-ready session)
     (when (string-empty-p (string-trim prompt))
       (user-error "Prompt is empty"))
     (unless (run-hook-with-args-until-success
@@ -226,6 +301,100 @@ Creates a fresh editable prompt.  Does not send to the agent."
     (when (buffer-live-p buffer)
       (kill-buffer buffer))
     (agent-ide--start-session directory)))
+
+(defun agent-ide--resume-session (session)
+  "Reconnect SESSION in its existing buffer, preserving the current draft."
+  (unless (agent-ide-session-acp-session-id session)
+    (user-error "This session has no saved ID; create a new session"))
+  (when (member (agent-ide-session-status session)
+                '("running" "interrupting" "initializing" "resuming" "creating-session"))
+    (user-error "Session is %s" (agent-ide-session-status session)))
+  (unless (file-directory-p (agent-ide-session-directory session))
+    (user-error "Session directory no longer exists: %s"
+                (agent-ide-session-directory session)))
+  (agent-ide--display-buffer (agent-ide-session-buffer session))
+  (if (and (equal (agent-ide-session-status session) "idle")
+           (process-live-p (map-elt (agent-ide-session-client session) :process)))
+      (message "Session is already connected")
+    (let ((old-client (agent-ide-session-client session)))
+      (setf (agent-ide-session-client session) nil)
+      (when old-client (ignore-errors (acp-shutdown :client old-client))))
+    (agent-ide--invalidate-connection session)
+    (agent-ide--session-metadata-put session :restoring t)
+    (agent-ide--session-metadata-put session :available-commands nil)
+    (agent-ide--set-status session "resuming")
+    (agent-ide-renderer-append-status session "Restoring session...")
+    (unless (agent-ide-renderer-input-active-p session)
+      (agent-ide-renderer-create-prompt session))
+    (condition-case err
+        (progn
+          (setf (agent-ide-session-client session) (agent-ide--make-client session))
+          (agent-ide--subscribe-client session)
+          (agent-ide-protocol-initialize
+           session (lambda () (agent-ide-protocol-restore-session session))))
+      (error (agent-ide--restore-failed
+              session `((message . ,(error-message-string err))))))))
+
+(defun agent-ide--resume-entry (entry)
+  "Open or restore the historical session described by ENTRY."
+  (agent-ide--cleanup-dead-sessions)
+  (let* ((id (map-elt entry 'sessionId))
+         (directory (map-elt entry 'directory))
+         (backend (map-elt entry 'backend))
+         (existing
+          (cl-find-if
+           (lambda (session)
+             (and (equal id (agent-ide-session-acp-session-id session))
+                  (equal directory (agent-ide-session-directory session))
+                  (equal backend
+                         (agent-ide-history-backend-key
+                          (agent-ide--session-metadata-get session :command)))))
+           agent-ide--sessions)))
+    (unless (file-directory-p directory)
+      (user-error "Session directory no longer exists: %s" directory))
+    (unless (or existing
+                (equal backend (agent-ide-history-backend-key agent-ide-command)))
+      (user-error "Configure agent-ide-command for this session's backend (%s) first"
+                  (map-elt entry 'backendName)))
+    (let ((session (or existing (agent-ide--create-session directory t))))
+      (unless existing
+        (setf (agent-ide-session-acp-session-id session) id)
+        (unless (equal (map-elt entry 'title) "Untitled")
+          (agent-ide--session-metadata-put session :title (map-elt entry 'title)))
+        (agent-ide--set-status session "disconnected"))
+      (if (and existing
+               (not (member (agent-ide-session-status existing) '("disconnected" "failed")))
+               (process-live-p (map-elt (agent-ide-session-client existing) :process)))
+          (agent-ide--display-buffer (agent-ide-session-buffer existing))
+        (agent-ide--resume-session session))
+      session)))
+
+;;;###autoload
+(defun agent-ide-resume-history (&optional all-projects directory)
+  "Choose history for DIRECTORY or this project; a prefix uses ALL-PROJECTS."
+  (interactive "P")
+  (let* ((directory (unless all-projects
+                      (or directory
+                          (when-let* ((session (agent-ide--session-for-buffer)))
+                            (agent-ide-session-directory session))
+                          (agent-ide--working-directory))))
+         (candidates (agent-ide-history-candidates directory)))
+    (unless candidates
+      (user-error "No saved sessions%s"
+                  (if directory " in this project; use C-u M-x agent-ide-resume for all projects" "")))
+    (agent-ide--resume-entry
+     (cdr (assoc (completing-read "Resume session: " candidates nil t) candidates)))))
+
+;;;###autoload
+(defun agent-ide-resume (&optional all-projects)
+  "Resume this disconnected session, otherwise choose a saved session.
+With a prefix argument, always choose from all projects."
+  (interactive "P")
+  (let ((session (agent-ide--session-for-buffer)))
+    (if (and (not all-projects) session
+             (member (agent-ide-session-status session) '("disconnected" "failed")))
+        (agent-ide--resume-session session)
+      (agent-ide-resume-history all-projects))))
 
 ;;; Region context
 

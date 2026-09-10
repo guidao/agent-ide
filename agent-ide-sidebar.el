@@ -48,6 +48,8 @@
     (define-key map (kbd "RET") #'agent-ide-sidebar-select)
     (define-key map [mouse-1] #'agent-ide-sidebar-select)
     (define-key map (kbd "k") #'agent-ide-sidebar-kill)
+    (define-key map (kbd "r") #'agent-ide-sidebar-resume)
+    (define-key map (kbd "h") #'agent-ide-sidebar-history)
     (define-key map (kbd "g") #'agent-ide-sidebar-refresh)
     (define-key map (kbd "q") #'agent-ide-sidebar-quit)
     map)
@@ -447,6 +449,19 @@ opening another split."
       (user-error "Session is dead"))
     (agent-ide-sidebar--display-session session)
     (agent-ide-sidebar-refresh)))
+
+(defun agent-ide-sidebar-resume ()
+  "Restore the session at point, or display it if already connected."
+  (interactive)
+  (agent-ide--resume-session
+   (or (agent-ide-sidebar--session-at-point) (user-error "No session at point"))))
+
+(defun agent-ide-sidebar-history (&optional all-projects)
+  "Choose history for the entry at point, or ALL-PROJECTS with a prefix."
+  (interactive "P")
+  (let ((session (agent-ide-sidebar--session-at-point)))
+    (agent-ide-resume-history
+     all-projects (when session (agent-ide-session-directory session)))))
 
 (defun agent-ide-sidebar-kill ()
   "Kill the session at point."

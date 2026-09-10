@@ -100,6 +100,15 @@
   (and (agent-ide-session-p session)
        (buffer-live-p (agent-ide-session-buffer session))))
 
+(defun agent-ide--assert-ready (session)
+  "Signal a user error unless SESSION can accept a new prompt."
+  (unless (and (agent-ide-session-acp-session-id session)
+               (member (agent-ide-session-status session) '(nil "idle"))
+               (let ((process (map-elt (agent-ide-session-client session) :process)))
+                 (or (not process) (process-live-p process))))
+    (user-error "Session is %s; wait until ready or use agent-ide-resume"
+                (or (agent-ide-session-status session) "not ready"))))
+
 (defun agent-ide--cleanup-dead-sessions ()
   "Remove dead sessions from `agent-ide--sessions'."
   (setq agent-ide--sessions
