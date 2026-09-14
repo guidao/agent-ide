@@ -214,16 +214,23 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-sidebar-auto-show` | `nil` | Auto-show on session create when enabled; ignored for refresh while user-dismissed |
 | `agent-ide-sidebar-confirm-kill` | `t` | Confirm before kill |
 | `agent-ide-latex-preview` | `t` | Preview complete math fragments in graphical Emacs |
-| `agent-ide-latex-process` | `dvisvgm` | Org conversion process: `dvisvgm` (SVG) or `dvipng` (PNG) |
+| `agent-ide-latex-process` | `xelatex` | Org conversion process: `xelatex` (Chinese-capable SVG), `dvisvgm` (SVG) or `dvipng` (PNG) |
+| `agent-ide-latex-cjk-font` | `Songti SC` on macOS; `FandolSong-Regular.otf` elsewhere | Chinese font for XeLaTeX |
 | `agent-ide-latex-scale` | `1.0` | Formula image scale |
 | `agent-ide-latex-timeout` | `20` | Maximum seconds per formula conversion |
 
 ### Previewing math
 
-Formula previews require graphical Emacs with SVG support, `latex` and `dvisvgm`
-available in Emacs's `exec-path`. Alternatively, select `dvipng` with PNG support.
+Formula previews default to XeLaTeX and require graphical Emacs with SVG support,
+`xelatex` and `dvisvgm` in Emacs's `exec-path`, the TeX package `xeCJK`, and the
+font selected by `agent-ide-latex-cjk-font`. The default font is Songti SC on
+macOS and the TeX Live font FandolSong-Regular.otf on other systems.
+This supports Chinese inside formulas, for example `\(x^2\text{，指数为二}\)`.
+
 Org's LaTeX preview engine runs in a background Emacs process using its default
-preamble and packages. It does not load your Org configuration.
+preamble plus the xeCJK package and selected Chinese font. It does not load your
+Org configuration. For the original non-CJK pipeline, select `dvisvgm` with
+`latex`, or `dvipng` with `latex` and PNG support.
 
 Use `$x^2$` or `\(x^2\)` for inline math, and `$$...$$` or `\[...\]` for
 display math. Previews appear after the closing delimiter arrives, including in
@@ -233,16 +240,27 @@ no spaces immediately inside its delimiters; ordinary `$5 and $10` stays text.
 
 The underlying LaTeX text remains available for copying. Missing tools, invalid
 formulas and conversion timeouts leave the source visible. Identical formulas
-share cached images during the Emacs session.
+share cached images during the Emacs session. On conversion failure, hover over
+the formula to see the error summary, or place point in its source and run
+`M-x agent-ide-latex-show-error` to read the retained diagnostic log.
 
 Run `M-x agent-ide-preview-latex` in a session to preview existing messages or
-refresh after changing the scale or theme. This preserves the editable prompt.
+refresh after changing the engine, Chinese font, scale or theme. This preserves
+the editable prompt. Each Markdown body is refreshed separately so raw tool
+output cannot disrupt later replies. Recent replies are queued first when old
+formulas need conversion.
+New replies take priority over history refresh and session replay, including
+formulas already waiting in the history queue. A conversion already running is
+allowed to finish before the next live formula starts.
 For example:
 
 ```elisp
 (setq agent-ide-latex-scale 1.3)
 ;; Then run M-x agent-ide-preview-latex in the session.
 ```
+
+When upgrading an already running Emacs from the previous default, enable the
+new engine with `(setq agent-ide-latex-process 'xelatex)` and refresh previews.
 
 To turn previews off, set `agent-ide-latex-preview` to `nil`; run the same command
 to remove existing previews from the current session.

@@ -109,6 +109,10 @@
               (with-current-buffer buffer
                 (should-not (get-text-property 1 'display))
                 (should (string-match-p "failed" (get-text-property 1 'help-echo)))
+                (should (string-match-p "Undefined control sequence" (get-text-property 1 'help-echo)))
+                (let ((record (gethash (get-text-property 1 'agent-ide-latex-key)
+                                       agent-ide-latex--cache)))
+                  (should (string-match-p "notARealCommand" (plist-get record :log))))
                 (goto-char 1)
                 (search-forward "$x^2$")
                 (let ((image (get-text-property (1- (point)) 'display)))
@@ -170,8 +174,196 @@
           (while agent-ide-latex--process (accept-process-output nil 0.05))
           (should-not (get-text-property 1 'display))
           (should-not (file-exists-p directory))
+          (should (string-match-p "timed out" (get-text-property 1 'help-echo)))
           (should (eq (plist-get (gethash (get-text-property 1 'agent-ide-latex-key)
                                           agent-ide-latex--cache) :status) 'failed)))))))
+
+(ert-deftest agent-ide-latex-xelatex-settings-and-font-cache ()
+  "XeLaTeX needs the SVG converter, and font changes invalidate cached images."
+  (let ((agent-ide-latex-process 'xelatex)
+        (agent-ide-latex-preview t))
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (type) (eq type 'svg)))
+              ((symbol-function 'executable-find)
+               (lambda (name) (member name '("xelatex" "dvisvgm")))))
+      (let* ((agent-ide-latex-cjk-font "Font A")
+             (first (agent-ide-latex--settings))
+             (agent-ide-latex-cjk-font "Font B"))
+        (should first)
+        (should-not (equal first (agent-ide-latex--settings)))))
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+              ((symbol-function 'executable-find) (lambda (name) (equal name "xelatex"))))
+      (should-not (agent-ide-latex--settings)))))
+
+(ert-deftest agent-ide-latex-xelatex-chinese-integration ()
+  "Render the reported Chinese formulas, retaining their original source."
+  (skip-unless (and (executable-find "xelatex") (executable-find "dvisvgm")
+                    (image-type-available-p 'svg)))
+  (agent-ide-latex-test--isolated
+    (let ((agent-ide-latex-process 'xelatex)
+          (agent-ide-latex-preview t)
+          (source (concat "对于 **\\(e^{x^y}\\)**，一般不能进一步化简。要区分括号的位置：\n"
+                          "\\[\n\\boxed{e^{(x^y)}}\\qquad\\text{先算 }x^y\\text{，再作为 }e\\text{ 的指数};\n\\]\n"
+                          "\\[\n\\boxed{(e^x)^y=e^{xy}}\\qquad\\text{幂的乘方，指数相乘}.\n\\]")))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+        (with-temp-buffer
+          (insert source)
+          (agent-ide-renderer-render-markdown-region 1 (point-max))
+          (while agent-ide-latex--process (accept-process-output nil 0.05))
+          (should (equal source (buffer-substring-no-properties 1 (point-max))))
+          (let ((fragments (agent-ide-latex-prepare 1 (point-max))))
+            (should (= (length fragments) 3))
+            (dolist (fragment fragments)
+              (let ((image (get-text-property (car fragment) 'display)))
+                (should (eq (car-safe image) 'image))
+                (should (eq (plist-get (cdr image) :type) 'svg))
+                (should (string-match-p "<path" (plist-get (cdr image) :data)))))))))))
+
+(ert-deftest agent-ide-latex-xelatex-missing-font-recovery ()
+  "Keep font diagnostics and retry with a different font without restarting."
+  (skip-unless (and (executable-find "xelatex") (executable-find "dvisvgm")
+                    (image-type-available-p 'svg)))
+  (agent-ide-latex-test--isolated
+    (let ((agent-ide-latex-process 'xelatex)
+          (agent-ide-latex-preview t)
+          (working-font agent-ide-latex-cjk-font)
+          (agent-ide-latex-cjk-font "Agent IDE Missing Font 12345"))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+        (with-temp-buffer
+          (insert "$\\text{中文}$")
+          (agent-ide-renderer-render-markdown-region 1 (point-max))
+          (while agent-ide-latex--process (accept-process-output nil 0.05))
+          (should-not (get-text-property 1 'display))
+          (should (string-match-p "fontspec" (get-text-property 1 'help-echo)))
+          (should (string-match-p "cannot be found" (get-text-property 1 'help-echo)))
+          (goto-char 1)
+          (save-window-excursion
+            (unwind-protect
+                (progn
+                  (agent-ide-latex-show-error)
+                  (with-current-buffer "*Agent IDE Formula Error*"
+                    (should (string-match-p "cannot be found" (buffer-string)))))
+              (when-let* ((buffer (get-buffer "*Agent IDE Formula Error*")))
+                (kill-buffer buffer))))
+          (let ((agent-ide-latex-cjk-font working-font))
+            (agent-ide-renderer-render-markdown-region 1 (point-max))
+            (while agent-ide-latex--process (accept-process-output nil 0.05)))
+          (should (eq (car-safe (get-text-property 1 'display)) 'image))
+          (should (= (hash-table-count agent-ide-latex--cache) 2)))))))
+
+(ert-deftest agent-ide-latex-refresh-isolates-transcript-markdown-regions ()
+  "An unmatched backtick in tool output must not swallow later replies."
+  (agent-ide-latex-test--isolated
+    (cl-letf (((symbol-function 'agent-ide-latex--settings)
+               (lambda () '(xelatex 1.0 "#000000" "Songti SC")))
+              ((symbol-function 'agent-ide-latex--start-next) #'ignore))
+      (with-temp-buffer
+        (insert "Tool output: `unfinished $command\n")
+        (agent-ide-renderer-render-markdown-region 1 (point-max))
+        (insert "\nAssistant\n\n")
+        (let ((start (point)))
+          (insert "\\[\\text{中文} + x^2\\]\n")
+          (agent-ide-renderer-render-markdown-region start (point)))
+        (insert "\nAssistant\n\n")
+        (let ((start (point)))
+          (insert "$$y^2$$\n")
+          (agent-ide-renderer-render-markdown-region start (point)))
+        (let ((boundary (point)))
+          (insert "Draft $z$")
+          (setq-local agent-ide--session
+                      (agent-ide--make-session :buffer (current-buffer)
+                       :input-prompt-start-marker (copy-marker boundary)))
+          (agent-ide-preview-latex)
+          (goto-char 1)
+          (search-forward "\\[")
+          (should (get-text-property (- (point) 2) 'agent-ide-latex-key))
+          (search-forward "$$")
+          (should (get-text-property (- (point) 2) 'agent-ide-latex-key))
+          (should (= (length agent-ide-latex--queue) 2))
+          (should-not (text-property-not-all boundary (point-max) 'agent-ide-latex-key nil)))))))
+
+(ert-deftest agent-ide-latex-refresh-upgrades-legacy-buffer ()
+  "Hotloaded previews reuse legacy math properties, preserving source and point."
+  (agent-ide-latex-test--isolated
+    (cl-letf (((symbol-function 'agent-ide-latex--settings)
+               (lambda () '(xelatex 1.0 "#000000" "Songti SC")))
+              ((symbol-function 'agent-ide-latex--start-next) #'ignore))
+      (with-temp-buffer
+        (insert "Raw tool output `\n\nAssistant\n\n")
+        (let ((start (point)))
+          (insert "\\[\\text{中文}\\]")
+          (put-text-property start (point) 'agent-ide-latex t)
+          (setq-local agent-ide--session
+                      (agent-ide--make-session :buffer (current-buffer)
+                       :input-prompt-start-marker (copy-marker (point))))
+          (let ((source (buffer-string)) (position (point)))
+            (agent-ide-preview-latex)
+            (should (= position (point)))
+            (should (equal (substring-no-properties source)
+                           (buffer-substring-no-properties 1 (point-max)))))
+          (should (get-text-property start 'agent-ide-latex-key))
+          (should (= (length agent-ide-latex--queue) 1)))))))
+
+(defun agent-ide-latex-test--queued-sources ()
+  (mapcar (lambda (key) (plist-get (gethash key agent-ide-latex--cache) :source))
+          agent-ide-latex--queue))
+
+(ert-deftest agent-ide-latex-live-output-precedes-history-backlog ()
+  "New formulas and reused history formulas get priority without duplication."
+  (agent-ide-latex-test--isolated
+    (cl-letf (((symbol-function 'agent-ide-latex--settings)
+               (lambda () '(xelatex 1.0 "#000000" "Songti SC")))
+              ((symbol-function 'agent-ide-latex--start-next) #'ignore))
+      (with-temp-buffer
+        (insert "$oldA$ $shared$ $oldB$")
+        (let ((agent-ide-latex--background-render t))
+          (agent-ide-renderer-render-markdown-region 1 (point-max))))
+      (with-temp-buffer
+        (insert "$liveA$ $shared$")
+        (agent-ide-renderer-render-markdown-region 1 (point-max))
+        ;; Streaming rerenders the existing prefix on every chunk.
+        (insert " $liveB$")
+        (agent-ide-renderer-render-markdown-region 1 (point-max)))
+      (should (equal (agent-ide-latex-test--queued-sources)
+                     '("$liveA$" "$shared$" "$liveB$" "$oldA$" "$oldB$")))
+      (should (= (hash-table-count agent-ide-latex--cache) 5)))))
+
+(ert-deftest agent-ide-latex-promotes-already-marked-formula ()
+  "A cache key installed by refresh must not prevent foreground promotion."
+  (agent-ide-latex-test--isolated
+    (cl-letf (((symbol-function 'agent-ide-latex--settings)
+               (lambda () '(xelatex 1.0 "#000000" "Songti SC")))
+              ((symbol-function 'agent-ide-latex--start-next) #'ignore))
+      (with-temp-buffer
+        (insert "$old$")
+        (let ((agent-ide-latex--background-render t))
+          (agent-ide-renderer-render-markdown-region 1 (point-max))))
+      (with-temp-buffer
+        (insert "$new$")
+        (let ((agent-ide-latex--background-render t))
+          (agent-ide-renderer-render-markdown-region 1 (point-max)))
+        (should (get-text-property 1 'agent-ide-latex-key))
+        (agent-ide-renderer-render-markdown-region 1 (point-max))
+        (should (equal (agent-ide-latex-test--queued-sources) '("$new$" "$old$")))
+        (let ((record (gethash (car agent-ide-latex--queue) agent-ide-latex--cache)))
+          (should (= (length (plist-get record :waiters)) 1)))))))
+
+(ert-deftest agent-ide-latex-replayed-history-stays-in-background ()
+  (agent-ide-latex-test--isolated
+    (cl-letf (((symbol-function 'agent-ide-latex--settings)
+               (lambda () '(xelatex 1.0 "#000000" "Songti SC")))
+              ((symbol-function 'agent-ide-latex--start-next) #'ignore))
+      (with-temp-buffer
+        (setq-local agent-ide--session (agent-ide--make-session :buffer (current-buffer)))
+        (agent-ide--session-metadata-put agent-ide--session :replaying t)
+        (insert "$history$")
+        (agent-ide-renderer-render-markdown-region 1 (point-max))
+        (should-not (plist-get (gethash (car agent-ide-latex--queue) agent-ide-latex--cache)
+                               :foreground)))
+      (with-temp-buffer
+        (insert "$live$")
+        (agent-ide-renderer-render-markdown-region 1 (point-max)))
+      (should (equal (agent-ide-latex-test--queued-sources) '("$live$" "$history$"))))))
 
 (provide 'agent-ide-latex-test)
 ;;; agent-ide-latex-test.el ends here

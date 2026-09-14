@@ -14,15 +14,24 @@
 (require 'agent-ide-core)
 
 (defvar org-preview-latex-process-alist)
+(defvar org-format-latex-header)
+(defvar org-latex-compiler)
 (declare-function org-create-formula-image "org")
 
 (defcustom agent-ide-latex-preview t
   "Whether complete math fragments are automatically previewed."
   :type 'boolean :group 'agent-ide)
 
-(defcustom agent-ide-latex-process 'dvisvgm
-  "Org preview process used for formulas."
-  :type '(choice (const dvisvgm) (const dvipng)) :group 'agent-ide)
+(defcustom agent-ide-latex-process 'xelatex
+  "Org preview process used for formulas.
+The default uses XeLaTeX and xeCJK for Chinese text, then dvisvgm for SVG."
+  :type '(choice (const xelatex) (const dvisvgm) (const dvipng)) :group 'agent-ide)
+
+(defcustom agent-ide-latex-cjk-font
+  (if (eq system-type 'darwin) "Songti SC" "FandolSong-Regular.otf")
+  "Chinese font used by the XeLaTeX preview process.
+Use an installed font name or a TeX-discoverable font filename."
+  :type 'string :group 'agent-ide)
 
 (defcustom agent-ide-latex-scale 1.0
   "Scale applied to Org's formula previews."
@@ -42,6 +51,8 @@ They run in the buffer containing the formula source.")
 (defvar agent-ide-latex--cache (make-hash-table :test 'equal))
 (defvar agent-ide-latex--queue nil)
 (defvar agent-ide-latex--process nil)
+(defvar agent-ide-latex--background-render nil
+  "Non-nil while scheduling formula previews for existing history.")
 
 (defun agent-ide-latex--escaped-p (position)
   "Return non-nil if the delimiter at POSITION is escaped."
@@ -66,6 +77,13 @@ They run in the buffer containing the formula source.")
   "Protect math in START..END from Markdown and return complete fragments.
 Each fragment is (START END SOURCE).  Skip fenced and inline code, including
 unfinished code fences.  Dollar math stays on one line unless it uses $$."
+  ;; Remember the caller's Markdown boundary.  A transcript also contains
+  ;; prompts and raw tool output; it must never be parsed as one document.
+  (when (< start end)
+    (with-silent-modifications
+      (put-text-property start end 'agent-ide-latex-region
+                         (or (get-text-property start 'agent-ide-latex-region)
+                             (list 'markdown)))))
   (save-excursion
     (save-match-data
       (goto-char start)
@@ -110,16 +128,28 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
                   (goto-char (if single body end))))))))
         (nreverse fragments)))))
 
+(defun agent-ide-latex--image-type (process)
+  "Return the image type produced by PROCESS."
+  (if (eq process 'dvipng) 'png 'svg))
+
+(defun agent-ide-latex--programs ()
+  "Return the programs required by the selected preview process."
+  (pcase agent-ide-latex-process
+    ('xelatex '("xelatex" "dvisvgm"))
+    ('dvisvgm '("latex" "dvisvgm"))
+    ('dvipng '("latex" "dvipng"))
+    (_ (error "Unsupported formula preview process: %s" agent-ide-latex-process))))
+
 (defun agent-ide-latex--settings ()
   "Return preview settings, or nil if previews cannot be displayed."
   (when (and agent-ide-latex-preview (display-images-p)
-             (executable-find "latex")
-             (executable-find (symbol-name agent-ide-latex-process))
-             (image-type-available-p (if (eq agent-ide-latex-process 'dvisvgm) 'svg 'png)))
+             (cl-every #'executable-find (agent-ide-latex--programs))
+             (image-type-available-p (agent-ide-latex--image-type agent-ide-latex-process)))
     (let ((rgb (or (ignore-errors (color-values (face-foreground 'default nil t)))
                    '(0 0 0))))
       (list agent-ide-latex-process agent-ide-latex-scale
-            (apply #'format "#%02x%02x%02x" (mapcar (lambda (v) (/ v 257)) rgb))))))
+            (apply #'format "#%02x%02x%02x" (mapcar (lambda (v) (/ v 257)) rgb))
+            (when (eq agent-ide-latex-process 'xelatex) agent-ide-latex-cjk-font)))))
 
 (defun agent-ide-latex--apply (waiter image error-message)
   "Apply IMAGE or ERROR-MESSAGE to a still-valid WAITER."
@@ -147,37 +177,70 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
 (defun agent-ide-latex-render (fragments)
   "Schedule previews of FRAGMENTS, sharing conversions across buffers."
   (when-let* ((settings (agent-ide-latex--settings)))
-    (dolist (fragment fragments)
-      (pcase-let* ((`(,begin ,end ,source) fragment)
-                   (key (secure-hash 'sha256 (prin1-to-string (cons source settings)))))
-        (unless (equal key (get-text-property begin 'agent-ide-latex-key))
-          (let* ((record (gethash key agent-ide-latex--cache))
-                 (waiter (list (copy-marker begin t) (copy-marker end nil) source key)))
-            (with-silent-modifications
-              (put-text-property begin end 'agent-ide-latex-key key))
-            (if (memq (plist-get record :status) '(done failed))
-                (agent-ide-latex--apply waiter (plist-get record :image) (plist-get record :error))
-              (unless record
-                (setq record (list :status 'queued :source source :settings settings))
-                (setq agent-ide-latex--queue (nconc agent-ide-latex--queue (list key))))
-              (setq record (plist-put record :waiters (cons waiter (plist-get record :waiters))))
-              (puthash key record agent-ide-latex--cache))))))
-    (agent-ide-latex--start-next)))
+    (let ((background (or agent-ide-latex--background-render
+                          (when-let* ((session (agent-ide--session-for-buffer)))
+                            (agent-ide--session-metadata-get session :replaying))))
+          promoted)
+      (dolist (fragment fragments)
+        (pcase-let* ((`(,begin ,end ,source) fragment)
+                     (key (secure-hash 'sha256 (prin1-to-string (cons source settings)))))
+          (unless (equal key (get-text-property begin 'agent-ide-latex-key))
+            (let* ((record (gethash key agent-ide-latex--cache))
+                   (waiter (list (copy-marker begin t) (copy-marker end nil) source key)))
+              (with-silent-modifications
+                (put-text-property begin end 'agent-ide-latex-key key))
+              (if (memq (plist-get record :status) '(done failed))
+                  (agent-ide-latex--apply waiter (plist-get record :image) (plist-get record :error))
+                (unless record
+                  (setq record (list :status 'queued :source source :settings settings))
+                  (setq agent-ide-latex--queue (nconc agent-ide-latex--queue (list key))))
+                (setq record (plist-put record :waiters (cons waiter (plist-get record :waiters))))
+                (puthash key record agent-ide-latex--cache))))
+          ;; A live reply may reuse a formula already waiting in the history
+          ;; queue, including one whose buffer already has its cache key.
+          (let ((record (gethash key agent-ide-latex--cache)))
+            (when (and (not background) (not (plist-get record :foreground))
+                       (member key agent-ide-latex--queue))
+              (puthash key (plist-put record :foreground t) agent-ide-latex--cache)
+              (push key promoted)))))
+      (when promoted
+        ;; Keep FIFO order for live requests, including promoted history jobs.
+        (let ((foreground-p (lambda (key)
+                              (plist-get (gethash key agent-ide-latex--cache) :foreground)))
+              (remaining (cl-remove-if (lambda (key) (member key promoted))
+                                       agent-ide-latex--queue)))
+          (setq agent-ide-latex--queue
+                (append (cl-remove-if-not foreground-p remaining)
+                        (nreverse promoted)
+                        (cl-remove-if foreground-p remaining)))))
+      (agent-ide-latex--start-next))))
+
+(defun agent-ide-latex--error-summary (log)
+  "Extract the first TeX error from LOG, joining package continuation lines."
+  (when (and log (string-match "^! +\\([^\n]+\\(?:\n([^\n)]+)[ \t]+[^\n]+\\)*\\)" log))
+    (replace-regexp-in-string "\n([^\n)]+)[ \t]+" " " (match-string 1 log))))
 
 (defun agent-ide-latex--complete (key directory output log-buffer success)
   "Finish conversion KEY using OUTPUT and SUCCESS, then clean DIRECTORY."
   (let* ((record (gethash key agent-ide-latex--cache))
-         (type (if (eq (car (plist-get record :settings)) 'dvisvgm) 'svg 'png))
+         (type (agent-ide-latex--image-type (car (plist-get record :settings))))
          (image (and success (file-exists-p output)
                      (ignore-errors
                        (with-temp-buffer
                          (set-buffer-multibyte nil)
                          (insert-file-contents-literally output)
                          (create-image (buffer-string) type t :ascent 'center)))))
-         (failure "conversion failed; source retained"))
+         (log (when (and (not image) (buffer-live-p log-buffer))
+                (with-current-buffer log-buffer
+                  (buffer-substring-no-properties (point-min) (min (point-max) (+ (point-min) 16000))))))
+         (detail (agent-ide-latex--error-summary log))
+         (failure (unless image
+                    (concat "conversion failed: " (or detail "no image produced")
+                            "; M-x agent-ide-latex-show-error for details"))))
     (setq record (plist-put record :status (if image 'done 'failed)))
     (setq record (plist-put record :image image))
     (setq record (plist-put record :error failure))
+    (setq record (plist-put record :log log))
     (dolist (waiter (plist-get record :waiters))
       (agent-ide-latex--apply waiter image failure))
     (setq record (plist-put record :waiters nil))
@@ -196,7 +259,9 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
            (directory (file-truename (make-temp-file "agent-ide-latex-" t)))
            (default-directory (file-name-as-directory directory))
            (input (expand-file-name "request.json" directory))
-           (output (expand-file-name (if (eq (car settings) 'dvisvgm) "formula.svg" "formula.png") directory))
+           (output (expand-file-name
+                    (concat "formula." (symbol-name (agent-ide-latex--image-type (car settings))))
+                    directory))
            (log-buffer (generate-new-buffer " *agent-ide-latex-worker*"))
            (process-environment
             (cons (concat "PATH=" (mapconcat #'identity (delq nil (copy-sequence exec-path))
@@ -209,11 +274,13 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
               (write-region
                (json-serialize `((source . ,(plist-get record :source))
                                  (output . ,output) (process . ,(symbol-name (car settings)))
-                                 (scale . ,(nth 1 settings)) (foreground . ,(nth 2 settings))))
+                                 (scale . ,(nth 1 settings)) (foreground . ,(nth 2 settings))
+                                 (cjkFont . ,(nth 3 settings))))
                nil input nil 'silent))
             (setq agent-ide-latex--process
                   (make-process
                    :name "agent-ide-latex" :buffer log-buffer :noquery t
+                   :coding 'utf-8-unix
                    :connection-type 'pipe
                    :command (list (expand-file-name invocation-name invocation-directory)
                                   "-Q" "--batch" "-L" (file-name-directory agent-ide-latex--library)
@@ -228,10 +295,18 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
             (setq timer (run-at-time
                          agent-ide-latex-timeout nil
                          (lambda (process)
-                           (when (process-live-p process) (delete-process process)))
+                           (when (process-live-p process)
+                             (with-current-buffer log-buffer
+                               (goto-char (point-max))
+                               (insert (format "\n! Conversion timed out after %s seconds.\n"
+                                               agent-ide-latex-timeout)))
+                             (delete-process process)))
                          agent-ide-latex--process)))
         (error
          (message "Agent IDE formula preview: %s" (error-message-string err))
+         (with-current-buffer log-buffer
+           (goto-char (point-max))
+           (insert "\n! " (error-message-string err) "\n"))
          (agent-ide-latex--complete key directory output log-buffer nil))))))
 
 (defun agent-ide-latex--worker (request-file)
@@ -242,6 +317,12 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
                     (insert-file-contents request-file)
                     (json-parse-buffer :object-type 'alist)))
          (type (intern (alist-get 'process request)))
+         (org-latex-compiler (if (eq type 'xelatex) "xelatex" "pdflatex"))
+         (org-format-latex-header
+          (if (eq type 'xelatex)
+              (concat org-format-latex-header "\n\\usepackage{xeCJK}\n\\setCJKmainfont{"
+                      (or (alist-get 'cjkFont request) agent-ide-latex-cjk-font) "}\n")
+            org-format-latex-header))
          (default-directory (file-name-directory request-file))
          (temporary-file-directory default-directory)
          (shell-file-name "/bin/sh")
@@ -249,12 +330,24 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
          (process-environment (append (list "openin_any=p" "openout_any=p" "shell_escape=f"
                                             (concat "TEXMFOUTPUT=" default-directory))
                                       process-environment))
-         (org-preview-latex-process-alist (copy-tree org-preview-latex-process-alist))
+         (processes (copy-tree org-preview-latex-process-alist))
+         ;; Define the XDV pipeline here for Org versions without that entry.
+         (org-preview-latex-process-alist
+          (if (eq type 'xelatex)
+              (cons (cons 'xelatex
+                          (plist-put (copy-tree (cdr (assq 'dvisvgm processes)))
+                                     :image-input-type "xdv"))
+                    processes)
+            processes))
          (entry (assq type org-preview-latex-process-alist)))
     ;; Reuse Org's preamble, packages, colors, scale and image conversion.
-    (unless (memq type '(dvisvgm dvipng)) (error "Unsupported formula preview process"))
+    (unless (memq type '(xelatex dvisvgm dvipng)) (error "Unsupported formula preview process"))
+    (when (eq type 'xelatex)
+      (setcdr entry (plist-put (cdr entry) :programs '("xelatex" "dvisvgm"))))
     (setcdr entry (plist-put (cdr entry) :latex-compiler
-                             '("latex -no-shell-escape -halt-on-error -interaction nonstopmode -output-directory %o %f")))
+                            (if (eq type 'xelatex)
+                                '("xelatex -no-pdf -no-shell-escape -halt-on-error -interaction nonstopmode -output-directory %o %f")
+                              '("latex -no-shell-escape -halt-on-error -interaction nonstopmode -output-directory %o %f"))))
     (condition-case err
         (org-create-formula-image
          (alist-get 'source request) (alist-get 'output request)
@@ -263,16 +356,54 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
       (error
        (when-let* ((buffer (get-buffer "*Org Preview LaTeX Output*")))
          (princ (with-current-buffer buffer (buffer-string))))
-       (signal (car err) (cdr err))))))
+       (princ (concat "\n! " (error-message-string err) "\n"))
+       (kill-emacs 1)))))
+
+;;;###autoload
+(defun agent-ide-latex-show-error ()
+  "Show the retained conversion error for the formula at point."
+  (interactive)
+  (let* ((key (get-text-property (point) 'agent-ide-latex-key))
+         (record (gethash key agent-ide-latex--cache)))
+    (unless (eq (plist-get record :status) 'failed)
+      (user-error "No failed formula at point"))
+    (with-help-window "*Agent IDE Formula Error*"
+      (princ (plist-get record :error))
+      (princ "\n\nFormula:\n")
+      (princ (plist-get record :source))
+      (princ "\n\nConversion log (up to 16000 characters):\n")
+      (princ (or (plist-get record :log) "No converter output available.")))))
+
+(defun agent-ide-latex--regions (end)
+  "Return independently rendered Markdown regions before END.
+For buffers rendered before region tracking was added, reuse the math ranges
+already recognized during streaming.  Do not scan unrelated transcript text."
+  (let ((pos (point-min)) regions)
+    (while (< pos end)
+      (let ((next (next-single-property-change pos 'agent-ide-latex-region nil end)))
+        (if (get-text-property pos 'agent-ide-latex-region)
+            (push (cons pos next) regions)
+          (let ((legacy-pos pos))
+            (while (< legacy-pos next)
+              (let ((legacy-end (next-single-property-change legacy-pos 'agent-ide-latex nil next)))
+                (when (get-text-property legacy-pos 'agent-ide-latex)
+                  (push (cons legacy-pos legacy-end) regions))
+                (setq legacy-pos legacy-end)))))
+        (setq pos next)))
+    (nreverse regions)))
 
 ;;;###autoload
 (defun agent-ide-preview-latex ()
   "Refresh formula previews in this session, excluding its editable prompt."
   (interactive)
   (let* ((session (or (agent-ide--session-for-buffer) (user-error "No Agent IDE session")))
-         (end (or (agent-ide-session-input-prompt-start-marker session) (point-max))))
+         (end (or (agent-ide-session-input-prompt-start-marker session) (point-max)))
+         (regions (agent-ide-latex--regions end))
+         (agent-ide-latex--background-render t))
     (unless (or (not agent-ide-latex-preview) (agent-ide-latex--settings))
-      (user-error "Formula previews need graphical Emacs, latex and %s" agent-ide-latex-process))
+      (user-error "Formula previews need graphical Emacs with %s support and %s"
+                  (agent-ide-latex--image-type agent-ide-latex-process)
+                  (string-join (agent-ide-latex--programs) ", ")))
     (with-silent-modifications
       (let ((pos (point-min)))
         (while (< pos end)
@@ -284,7 +415,9 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
                   (remhash key agent-ide-latex--cache)))
               (remove-text-properties pos next '(display nil agent-ide-latex-key nil help-echo nil)))
             (setq pos next))))
-      (agent-ide-latex-render (agent-ide-latex-prepare (point-min) end)))))
+      ;; Restore recent replies first when a long history needs conversion.
+      (dolist (region (reverse regions))
+        (agent-ide-latex-render (agent-ide-latex-prepare (car region) (cdr region)))))))
 
 (provide 'agent-ide-latex)
 ;;; agent-ide-latex.el ends here
