@@ -365,5 +365,78 @@
         (agent-ide-renderer-render-markdown-region 1 (point-max)))
       (should (equal (agent-ide-latex-test--queued-sources) '("$live$" "$history$"))))))
 
+(ert-deftest agent-ide-latex-hex-colors-ignore-terminal-palette ()
+  (let ((agent-ide-latex-preview t)
+        (agent-ide-latex-process 'xelatex))
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (&rest _) t))
+              ((symbol-function 'executable-find) (lambda (&rest _) t))
+              ((symbol-function 'face-foreground) (lambda (&rest _) "#34494a"))
+              ((symbol-function 'color-values) (lambda (&rest _) '(0 0 65535))))
+      (should (equal (nth 2 (agent-ide-latex--settings)) "#34494a"))))
+  (should (equal (agent-ide-latex--hex-rgb "#fff") '(1.0 1.0 1.0)))
+  (should (equal (agent-ide-latex--hex-rgb "#000000000000") '(0.0 0.0 0.0)))
+  (should (equal (agent-ide-latex--hex-rgb "#abc") (agent-ide-latex--hex-rgb "#aabbcc")))
+  (should-not (agent-ide-latex--hex-rgb "Transparent")))
+
+(ert-deftest agent-ide-latex-refresh-migrates-old-monochrome-cache ()
+  "Existing blue SVGs acquire the correct color without recompiling history."
+  (agent-ide-latex-test--isolated
+    (let* ((source "$x^2$")
+           (settings '(xelatex 1.0 "#34494a" "Songti SC"))
+           (old-key (secure-hash 'sha256 (prin1-to-string (cons source settings))))
+           (svg "<svg xmlns='http://www.w3.org/2000/svg'><g fill='#00f'><path d='M0 0'/></g></svg>")
+           (old-image `(image :type svg :data ,svg :ascent center)))
+      (puthash old-key (list :status 'done :source source :settings settings :image old-image)
+               agent-ide-latex--cache)
+      (cl-letf (((symbol-function 'agent-ide-latex--settings) (lambda () settings))
+                ((symbol-function 'agent-ide-latex--start-next)
+                 (lambda () (should-not agent-ide-latex--queue))))
+        (with-temp-buffer
+          (insert source)
+          (add-text-properties 1 (point-max)
+                               (list 'agent-ide-latex t 'agent-ide-latex-key old-key 'display old-image))
+          (setq-local agent-ide--session
+                      (agent-ide--make-session :buffer (current-buffer)
+                       :input-prompt-start-marker (copy-marker (point-max))))
+          (agent-ide-preview-latex)
+          (should (equal (get-text-property 1 'agent-ide-latex-key)
+                         (agent-ide-latex--cache-key source settings)))
+          (should (string-match-p "fill='#34494a'" (plist-get (cdr (get-text-property 1 'display)) :data)))
+          (should (equal (buffer-substring-no-properties 1 (point-max)) source)))
+        (should (= (hash-table-count agent-ide-latex--cache) 1))
+        (should-not (gethash old-key agent-ide-latex--cache))
+        (should (equal (plist-get (cdr old-image) :data) svg))))))
+
+(ert-deftest agent-ide-latex-cache-migration-preserves-explicit-colors ()
+  (agent-ide-latex-test--isolated
+    (let* ((source "$\\color{blue}x$")
+           (settings '(xelatex 1.0 "#34494a" "Songti SC"))
+           (old-key (secure-hash 'sha256 (prin1-to-string (cons source settings))))
+           (record (list :status 'done :source source :settings settings
+                         :image '(image :type svg :data "<svg><g fill='#00f'/></svg>"))))
+      (puthash old-key record agent-ide-latex--cache)
+      (should (= (agent-ide-latex--upgrade-color-cache) 0))
+      (should (eq (gethash old-key agent-ide-latex--cache) record))
+      (should-not (gethash (agent-ide-latex--cache-key source settings) agent-ide-latex--cache)))))
+
+(ert-deftest agent-ide-latex-exact-svg-color-integration ()
+  "Real batch workers preserve theme RGB and explicitly colored formula parts."
+  (skip-unless (and (executable-find "latex") (executable-find "xelatex")
+                    (executable-find "dvisvgm") (image-type-available-p 'svg)))
+  (agent-ide-latex-test--isolated
+    (let ((agent-ide-latex-preview t))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'face-foreground) (lambda (&rest _) "#34494a")))
+        (dolist (agent-ide-latex-process '(dvisvgm xelatex))
+          (with-temp-buffer
+            (insert "$x+{\\color{red}y}$")
+            (agent-ide-renderer-render-markdown-region 1 (point-max))
+            (while agent-ide-latex--process (accept-process-output nil 0.05))
+            (let ((data (plist-get (cdr (get-text-property 1 'display)) :data)))
+              (should (stringp data))
+              (should (string-match-p "fill=['\"]#34494a['\"]" data))
+              (should (string-match-p "fill=['\"]#f00['\"]" data)))))))))
+
 (provide 'agent-ide-latex-test)
 ;;; agent-ide-latex-test.el ends here

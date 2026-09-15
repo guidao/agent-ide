@@ -33,7 +33,7 @@ The default uses XeLaTeX and xeCJK for Chinese text, then dvisvgm for SVG."
 Use an installed font name or a TeX-discoverable font filename."
   :type 'string :group 'agent-ide)
 
-(defcustom agent-ide-latex-scale 1.0
+(defcustom agent-ide-latex-scale 1.3
   "Scale applied to Org's formula previews."
   :type 'number :group 'agent-ide)
 
@@ -53,6 +53,61 @@ They run in the buffer containing the formula source.")
 (defvar agent-ide-latex--process nil)
 (defvar agent-ide-latex--background-render nil
   "Non-nil while scheduling formula previews for existing history.")
+
+(defun agent-ide-latex--hex-rgb (color)
+  "Parse hexadecimal COLOR into RGB fractions without a display color lookup."
+  (when (and (stringp color)
+             (string-match-p "\\`#[[:xdigit:]]+\\'" color)
+             (memq (length color) '(4 7 10 13)))
+    (let* ((width (/ (1- (length color)) 3))
+           (maximum (float (1- (expt 16 width)))))
+      (cl-loop for start from 1 below (length color) by width
+               collect (/ (string-to-number (substring color start (+ start width)) 16)
+                          maximum)))))
+
+(defun agent-ide-latex--cache-key (source settings)
+  "Return a cache key for SOURCE and SETTINGS using exact RGB conversion."
+  (secure-hash 'sha256 (prin1-to-string (cons 'exact-rgb-v1 (cons source settings)))))
+
+(defun agent-ide-latex--upgrade-color-cache ()
+  "Migrate plain monochrome SVGs from the terminal-palette cache.
+Only migrate snippets without color commands or custom TeX definitions and
+SVGs with a single explicit fill color.  Everything else uses the new cache
+key and is regenerated normally, preserving intentional colors and PNGs.
+Return the number of migrated entries."
+  (let (migrations)
+    (maphash
+     (lambda (key record)
+       (let* ((source (plist-get record :source))
+              (settings (plist-get record :settings))
+              (image (plist-get record :image))
+              (svg (plist-get (cdr image) :data))
+              (color (nth 2 settings))
+              (case-fold-search t))
+         (when (and (eq (plist-get record :status) 'done)
+                    (equal key (secure-hash 'sha256 (prin1-to-string (cons source settings))))
+                    (eq (plist-get (cdr image) :type) 'svg)
+                    (stringp svg) (agent-ide-latex--hex-rgb color)
+                    (not (string-match-p "color\\|special\\|input\\|include\\|def\\|command\\|csname" source))
+                    (not (string-match-p "stroke=\\|<image\\|Gradient\\|<style" svg)))
+           (let ((pattern "\\bfill=['\"]\\(#[[:xdigit:]]+\\)['\"]")
+                 (pos 0) colors)
+             (while (string-match pattern svg pos)
+               (cl-pushnew (match-string 1 svg) colors :test #'equal)
+               (setq pos (match-end 0)))
+             (when (= (length colors) 1)
+               (let* ((data (replace-regexp-in-string pattern (concat "fill='" color "'") svg t t))
+                      (updated (copy-sequence record))
+                      (spec (copy-sequence image)))
+                 (setcdr spec (plist-put (cdr spec) :data data))
+                 (setq updated (plist-put updated :image spec))
+                 (push (list key (agent-ide-latex--cache-key source settings) updated) migrations)))))))
+     agent-ide-latex--cache)
+    (dolist (migration migrations)
+      (unless (gethash (nth 1 migration) agent-ide-latex--cache)
+        (puthash (nth 1 migration) (nth 2 migration) agent-ide-latex--cache))
+      (remhash (car migration) agent-ide-latex--cache))
+    (length migrations)))
 
 (defun agent-ide-latex--escaped-p (position)
   "Return non-nil if the delimiter at POSITION is escaped."
@@ -145,10 +200,13 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
   (when (and agent-ide-latex-preview (display-images-p)
              (cl-every #'executable-find (agent-ide-latex--programs))
              (image-type-available-p (agent-ide-latex--image-type agent-ide-latex-process)))
-    (let ((rgb (or (ignore-errors (color-values (face-foreground 'default nil t)))
-                   '(0 0 0))))
+    (let* ((foreground (face-foreground 'default nil t))
+           (rgb (or (agent-ide-latex--hex-rgb foreground)
+                    (mapcar (lambda (v) (/ v 65535.0))
+                            (ignore-errors (color-values foreground)))
+                    '(0.0 0.0 0.0))))
       (list agent-ide-latex-process agent-ide-latex-scale
-            (apply #'format "#%02x%02x%02x" (mapcar (lambda (v) (/ v 257)) rgb))
+            (apply #'format "#%02x%02x%02x" (mapcar (lambda (v) (round (* v 255))) rgb))
             (when (eq agent-ide-latex-process 'xelatex) agent-ide-latex-cjk-font)))))
 
 (defun agent-ide-latex--apply (waiter image error-message)
@@ -183,7 +241,7 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
           promoted)
       (dolist (fragment fragments)
         (pcase-let* ((`(,begin ,end ,source) fragment)
-                     (key (secure-hash 'sha256 (prin1-to-string (cons source settings)))))
+                     (key (agent-ide-latex--cache-key source settings)))
           (unless (equal key (get-text-property begin 'agent-ide-latex-key))
             (let* ((record (gethash key agent-ide-latex--cache))
                    (waiter (list (copy-marker begin t) (copy-marker end nil) source key)))
@@ -349,10 +407,18 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
                                 '("xelatex -no-pdf -no-shell-escape -halt-on-error -interaction nonstopmode -output-directory %o %f")
                               '("latex -no-shell-escape -halt-on-error -interaction nonstopmode -output-directory %o %f"))))
     (condition-case err
-        (org-create-formula-image
-         (alist-get 'source request) (alist-get 'output request)
-         (list :foreground (alist-get 'foreground request) :background "Transparent"
-               :scale (alist-get 'scale request)) t type)
+        (let ((org-color-format (symbol-function 'org-latex-color-format)))
+          ;; Org normally calls `color-values', which approximates even hex
+          ;; colors using the terminal palette in a --batch worker.
+          (cl-letf (((symbol-function 'org-latex-color-format)
+                     (lambda (color)
+                       (if-let* ((rgb (agent-ide-latex--hex-rgb color)))
+                           (mapconcat (lambda (v) (format "%.8f" v)) rgb ",")
+                         (funcall org-color-format color)))))
+            (org-create-formula-image
+             (alist-get 'source request) (alist-get 'output request)
+             (list :foreground (alist-get 'foreground request) :background "Transparent"
+                   :scale (alist-get 'scale request)) t type)))
       (error
        (when-let* ((buffer (get-buffer "*Org Preview LaTeX Output*")))
          (princ (with-current-buffer buffer (buffer-string))))
@@ -396,6 +462,7 @@ already recognized during streaming.  Do not scan unrelated transcript text."
 (defun agent-ide-preview-latex ()
   "Refresh formula previews in this session, excluding its editable prompt."
   (interactive)
+  (agent-ide-latex--upgrade-color-cache)
   (let* ((session (or (agent-ide--session-for-buffer) (user-error "No Agent IDE session")))
          (end (or (agent-ide-session-input-prompt-start-marker session) (point-max)))
          (regions (agent-ide-latex--regions end))

@@ -216,7 +216,7 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-latex-preview` | `t` | Preview complete math fragments in graphical Emacs |
 | `agent-ide-latex-process` | `xelatex` | Org conversion process: `xelatex` (Chinese-capable SVG), `dvisvgm` (SVG) or `dvipng` (PNG) |
 | `agent-ide-latex-cjk-font` | `Songti SC` on macOS; `FandolSong-Regular.otf` elsewhere | Chinese font for XeLaTeX |
-| `agent-ide-latex-scale` | `1.0` | Formula image scale |
+| `agent-ide-latex-scale` | `1.3` | Formula image scale |
 | `agent-ide-latex-timeout` | `20` | Maximum seconds per formula conversion |
 
 ### Previewing math
@@ -240,7 +240,11 @@ no spaces immediately inside its delimiters; ordinary `$5 and $10` stays text.
 
 The underlying LaTeX text remains available for copying. Missing tools, invalid
 formulas and conversion timeouts leave the source visible. Identical formulas
-share cached images during the Emacs session. On conversion failure, hover over
+share cached images during the Emacs session. Formula foreground colors preserve
+the theme's exact RGB values; explicit LaTeX color commands remain effective.
+Refreshing after an upgrade also repairs eligible monochrome SVG caches without
+recompiling them. Other old images are regenerated with the corrected colors.
+On conversion failure, hover over
 the formula to see the error summary, or place point in its source and run
 `M-x agent-ide-latex-show-error` to read the retained diagnostic log.
 
