@@ -240,6 +240,10 @@ no spaces immediately inside its delimiters; ordinary `$5 and $10` stays text.
 
 Move the text cursor into a formula in the session buffer to reveal its LaTeX
 source, as with `org-fragtog`; moving out restores the cached preview immediately.
+This also works while composing in session and inline input boxes. Complete
+formulas are previewed after each editing command; move back into a formula to
+edit its source. Edits refresh the preview, and sending always uses the original
+LaTeX text. Input styling and undo history are preserved.
 The underlying LaTeX text remains available for copying. Missing tools, invalid
 formulas and conversion timeouts leave the source visible. Identical formulas
 share cached images during the Emacs session. Formula foreground colors preserve

@@ -55,6 +55,68 @@ They run in the buffer containing the formula source.")
   "Non-nil while scheduling formula previews for existing history.")
 (defvar-local agent-ide-latex--revealed nil
   "Currently revealed formula as (BEGIN-MARKER END-MARKER PREVIEW).")
+(defvar-local agent-ide-latex--input-state nil
+  "Last input snapshot as (START TEXT PREVIEW-ENABLED MODIFICATION-TICK).")
+(defvar-local agent-ide-latex--input-fragments nil
+  "Input fragments tracked as (BEGIN-MARKER END-MARKER SOURCE).")
+
+(defun agent-ide-latex-update-input (start end)
+  "Preview editable input between START and END, preserving its text and faces.
+Call after editing commands.  Retain unchanged fragments and pending workers;
+discard stale previews, including properties inherited by newly inserted text."
+  (let* ((source (buffer-substring-no-properties start end))
+         (state (list start source agent-ide-latex-preview
+                      (buffer-chars-modified-tick))))
+    (unless (equal state agent-ide-latex--input-state)
+      (let* ((fragments
+              (when agent-ide-latex-preview
+                ;; Recognition protects Markdown by removing faces.  Parse a
+                ;; copy so editable prompt styling and undo are untouched.
+                (with-temp-buffer
+                  (insert source)
+                  (mapcar (lambda (fragment)
+                            (list (+ start (1- (car fragment)))
+                                  (+ start (1- (cadr fragment)))
+                                  (caddr fragment)))
+                          (agent-ide-latex-prepare (point-min) (point-max))))))
+             retained)
+        (dolist (old agent-ide-latex--input-fragments)
+          (pcase-let ((`(,begin ,finish ,text) old))
+            (let ((fragment (list (marker-position begin)
+                                  (marker-position finish) text)))
+              (when (and (member fragment fragments)
+                         (get-text-property begin 'agent-ide-latex-key))
+                (push (list begin finish
+                            (cl-loop for property in
+                                     '(agent-ide-latex-key agent-ide-latex-preview
+                                       display help-echo)
+                                     append (list property
+                                                  (get-text-property begin property))))
+                      retained)))))
+        (with-silent-modifications
+          ;; Only clear properties belonging to formulas, leaving other input
+          ;; display properties alone.  This also removes inherited tail images.
+          (let ((pos start))
+            (while (< pos end)
+              (let ((next (next-single-property-change pos 'agent-ide-latex-key nil end)))
+                (when (get-text-property pos 'agent-ide-latex-key)
+                  (remove-text-properties
+                   pos next '(agent-ide-latex-key nil agent-ide-latex-preview nil
+                              display nil help-echo nil)))
+                (setq pos next))))
+          (dolist (entry retained)
+            (add-text-properties (car entry) (cadr entry) (caddr entry))))
+        (dolist (old agent-ide-latex--input-fragments)
+          (set-marker (car old) nil)
+          (set-marker (cadr old) nil))
+        (setq agent-ide-latex--input-fragments
+              (mapcar (lambda (fragment)
+                        (list (copy-marker (car fragment) t)
+                              (copy-marker (cadr fragment) nil) (caddr fragment)))
+                      fragments)
+              agent-ide-latex--input-state state)
+        (agent-ide-latex-render fragments)))
+    (agent-ide-latex--reveal-at-point)))
 
 (defun agent-ide-latex--restore-preview ()
   "Restore the revealed formula if its source and preview are still valid."

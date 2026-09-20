@@ -358,6 +358,14 @@ already show a postframe/posframe avoid an extra *Completions* buffer."
     (agent-ide-renderer-make-input-editable session start end)
     (agent-ide-renderer-style-input-region session start end)))
 
+(defun agent-ide-session-mode-preview-input ()
+  "Update formula previews in the active editable prompt."
+  (when-let* ((session (agent-ide--session-for-buffer))
+              ((agent-ide-renderer-input-active-p session)))
+    (agent-ide-latex-update-input
+     (agent-ide-session-input-start-marker session)
+     (agent-ide-session-input-end-marker session))))
+
 (defun agent-ide-session-mode-protect-transcript (start end)
   "Reject manual edits outside the active prompt between START and END."
   (unless inhibit-read-only
@@ -430,6 +438,9 @@ Full URLs open with `browse-url'; file paths open with `find-file'."
             nil t)
   (add-hook 'post-command-hook
             #'agent-ide-session-mode-refresh-placeholder
+            nil t)
+  (add-hook 'post-command-hook
+            #'agent-ide-session-mode-preview-input
             nil t)
   (add-hook 'after-change-functions
             #'agent-ide-session-mode-refresh-placeholder

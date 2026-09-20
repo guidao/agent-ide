@@ -479,6 +479,26 @@ not the buffer the command happens to run in (the prompt window)."
 
 ;;; Turn-end finalization
 
+(ert-deftest agent-ide-inline-prompt-previews-editable-formulas ()
+  (let* ((agent-ide-latex--cache (make-hash-table :test 'equal))
+         (settings '(dvisvgm 1.0 "#000000"))
+         (image '(image :type svg :data "inline-input")))
+    (puthash (agent-ide-latex--cache-key "$x$" settings)
+             (list :status 'done :image image) agent-ide-latex--cache)
+    (cl-letf (((symbol-function 'agent-ide-latex--settings) (lambda () settings)))
+      (with-temp-buffer
+        (agent-ide-inline-prompt-mode)
+        (insert "$x$")
+        (run-hooks 'post-command-hook)
+        (should (eq (get-text-property 1 'display) image))
+        (goto-char 2)
+        (run-hooks 'post-command-hook)
+        (should-not (get-text-property 1 'display))
+        (goto-char (point-max))
+        (run-hooks 'post-command-hook)
+        (should (eq (get-text-property 1 'display) image))
+        (should (equal (buffer-substring-no-properties 1 (point-max)) "$x$"))))))
+
 (ert-deftest agent-ide-inline-formula-completion-refreshes-viewport ()
   (with-temp-buffer
     (insert "origin\n")

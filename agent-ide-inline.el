@@ -365,9 +365,14 @@ Interactively, SPC continues cycling and C-g clears."
     map)
   "Keymap for `agent-ide-inline-prompt-mode'.")
 
+(defun agent-ide-inline--preview-input ()
+  "Update formula previews in the inline prompt."
+  (agent-ide-latex-update-input (point-min) (point-max)))
+
 (define-derived-mode agent-ide-inline-prompt-mode text-mode "Agent-Inline"
   "Major mode for the inline prompt window."
   (setq-local header-line-format "")
+  (add-hook 'post-command-hook #'agent-ide-inline--preview-input nil t)
   (agent-ide-inline--update-prompt-header))
 
 ;;;###autoload
