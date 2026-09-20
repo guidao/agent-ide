@@ -238,6 +238,8 @@ inline replies. Fenced code blocks (including `latex` blocks) and inline code
 keep their source. Dollar-delimited inline math must stay on one line and have
 no spaces immediately inside its delimiters; ordinary `$5 and $10` stays text.
 
+Move the text cursor into a formula in the session buffer to reveal its LaTeX
+source, as with `org-fragtog`; moving out restores the cached preview immediately.
 The underlying LaTeX text remains available for copying. Missing tools, invalid
 formulas and conversion timeouts leave the source visible. Identical formulas
 share cached images during the Emacs session. Formula foreground colors preserve

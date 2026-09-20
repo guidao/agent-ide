@@ -53,6 +53,53 @@ They run in the buffer containing the formula source.")
 (defvar agent-ide-latex--process nil)
 (defvar agent-ide-latex--background-render nil
   "Non-nil while scheduling formula previews for existing history.")
+(defvar-local agent-ide-latex--revealed nil
+  "Currently revealed formula as (BEGIN-MARKER END-MARKER PREVIEW).")
+
+(defun agent-ide-latex--restore-preview ()
+  "Restore the revealed formula if its source and preview are still valid."
+  (when agent-ide-latex--revealed
+    (pcase-let ((`(,begin ,end ,preview) agent-ide-latex--revealed))
+      (save-restriction
+        (widen)
+        (when (and (marker-position begin) (marker-position end)
+                   (< begin end)
+                   (eq preview (get-text-property begin 'agent-ide-latex-preview))
+                   (equal (cadr preview) (buffer-substring-no-properties begin end)))
+          (with-silent-modifications
+            (put-text-property begin end 'display (car preview)))))
+      (set-marker begin nil)
+      (set-marker end nil))
+    (setq agent-ide-latex--revealed nil)))
+
+(defun agent-ide-latex--reveal-at-point ()
+  "Show formula source at point and restore the preview when point leaves.
+Only display properties change; source, undo history and modified state stay
+intact.  Each preview has its own identity even when images are shared."
+  (let ((preview (get-text-property (point) 'agent-ide-latex-preview)))
+    (unless (and agent-ide-latex--revealed
+                 (eq preview (nth 2 agent-ide-latex--revealed))
+                 (<= (nth 0 agent-ide-latex--revealed) (point))
+                 (< (point) (nth 1 agent-ide-latex--revealed)))
+      (agent-ide-latex--restore-preview))
+    (when (and preview (not agent-ide-latex--revealed))
+      (save-restriction
+        (widen)
+        (let ((begin (or (previous-single-property-change
+                          (1+ (point)) 'agent-ide-latex-preview)
+                         (point-min)))
+              (end (or (next-single-property-change
+                        (point) 'agent-ide-latex-preview)
+                       (point-max))))
+          (setq agent-ide-latex--revealed
+                (list (copy-marker begin t) (copy-marker end nil) preview)))))
+    (when agent-ide-latex--revealed
+      (save-restriction
+        (widen)
+        (with-silent-modifications
+          (remove-text-properties (nth 0 agent-ide-latex--revealed)
+                                  (nth 1 agent-ide-latex--revealed)
+                                  '(display nil)))))))
 
 (defun agent-ide-latex--hex-rgb (color)
   "Parse hexadecimal COLOR into RGB fractions without a display color lookup."
@@ -221,11 +268,17 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
                      (equal source (buffer-substring-no-properties begin end))
                      (equal key (get-text-property begin 'agent-ide-latex-key)))
             (with-silent-modifications
+              (put-text-property begin end 'agent-ide-latex-preview
+                                 (when image (list image source)))
               (if image
                   (put-text-property begin end 'display image)
 		(remove-text-properties begin end '(display nil)))
               (put-text-property begin end 'help-echo
 				 (if image source (concat "Formula preview: " error-message))))
+            (add-hook 'post-command-hook #'agent-ide-latex--reveal-at-point nil t)
+            ;; Hidden inline viewport buffers must retain their image properties.
+            (when (eq (current-buffer) (window-buffer (selected-window)))
+              (agent-ide-latex--reveal-at-point))
             (condition-case err
 		(run-hooks 'agent-ide-latex-updated-functions)
               (error (message "Agent IDE preview refresh: %s" (error-message-string err))))))))
@@ -480,8 +533,10 @@ already recognized during streaming.  Do not scan unrelated transcript text."
                      (record (gethash key agent-ide-latex--cache)))
                 (when (eq (plist-get record :status) 'failed)
                   (remhash key agent-ide-latex--cache)))
-              (remove-text-properties pos next '(display nil agent-ide-latex-key nil help-echo nil)))
+              (remove-text-properties pos next '(display nil agent-ide-latex-key nil
+                                                agent-ide-latex-preview nil help-echo nil)))
             (setq pos next))))
+      (agent-ide-latex--restore-preview)
       ;; Restore recent replies first when a long history needs conversion.
       (dolist (region (reverse regions))
         (agent-ide-latex-render (agent-ide-latex-prepare (car region) (cdr region)))))))

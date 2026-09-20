@@ -64,6 +64,111 @@
       (should-not (text-property-not-all 1 (point-max) 'display nil))
       (should-not (marker-buffer (car waiter))))))
 
+(defun agent-ide-latex-test--apply-preview (begin end image)
+  "Apply a completed preview IMAGE to BEGIN..END."
+  (with-silent-modifications
+    (put-text-property begin end 'agent-ide-latex-key "test-key"))
+  (agent-ide-latex--apply
+   (list (copy-marker begin t) (copy-marker end nil)
+         (buffer-substring-no-properties begin end) "test-key")
+   image nil))
+
+(ert-deftest agent-ide-latex-point-reveals-source-and-restores-preview ()
+  "Moving through a read-only formula preserves source, point and undo state."
+  (with-temp-buffer
+    (insert "a $x^2$ z")
+    (let ((image '(image :type svg :data "test")))
+      (agent-ide-latex-test--apply-preview 3 8 image)
+      (setq buffer-read-only t buffer-undo-list nil)
+      (set-buffer-modified-p nil)
+      (dolist (position '(3 5 7))
+        (goto-char position)
+        (run-hooks 'post-command-hook)
+        (should-not (text-property-not-all 3 8 'display nil))
+        (should (= (point) position)))
+      (goto-char 8)
+      (run-hooks 'post-command-hook)
+      (should (eq (get-text-property 3 'display) image))
+      ;; Enter from the right and leave on the left, too.
+      (goto-char 7)
+      (run-hooks 'post-command-hook)
+      (should-not (get-text-property 3 'display))
+      (goto-char 2)
+      (run-hooks 'post-command-hook)
+      (should (eq (get-text-property 3 'display) image))
+      (should-not agent-ide-latex--revealed)
+      (should-not (buffer-modified-p))
+      (should-not buffer-undo-list)
+      (should (equal (buffer-substring-no-properties 1 (point-max)) "a $x^2$ z")))))
+
+(ert-deftest agent-ide-latex-point-distinguishes-adjacent-shared-images ()
+  "Adjacent identical formulas reveal independently despite sharing an image."
+  (with-temp-buffer
+    (insert "\\(x\\)\\(x\\)")
+    (let ((image '(image :type svg :data "shared")))
+      (agent-ide-latex-test--apply-preview 1 6 image)
+      (agent-ide-latex-test--apply-preview 6 11 image)
+      (goto-char 1)
+      (run-hooks 'post-command-hook)
+      (should-not (get-text-property 1 'display))
+      (should (eq (get-text-property 6 'display) image))
+      (goto-char 6)
+      (run-hooks 'post-command-hook)
+      (should (eq (get-text-property 1 'display) image))
+      (should-not (get-text-property 6 'display))
+      (goto-char (point-max))
+      (run-hooks 'post-command-hook)
+      (should (eq (get-text-property 6 'display) image)))))
+
+(ert-deftest agent-ide-latex-completion-at-point-keeps-source-visible ()
+  "An asynchronous result at point stays revealed, including replacement images."
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert "$$x\n+y$$ tail")
+      (goto-char 4)
+      (dolist (image '((image :type svg :data "first")
+                       (image :type svg :data "updated")))
+        (agent-ide-latex-test--apply-preview 1 9 image)
+        (should-not (text-property-not-all 1 9 'display nil))
+        (should (= (point) 4)))
+      (goto-char 9)
+      (run-hooks 'post-command-hook)
+      (should (equal (get-text-property 1 'display)
+                     '(image :type svg :data "updated"))))))
+
+(ert-deftest agent-ide-latex-revealed-preview-survives-narrowing ()
+  (with-temp-buffer
+    (insert "$x$\ndraft")
+    (let ((image '(image :type svg :data "test")))
+      (agent-ide-latex-test--apply-preview 1 4 image)
+      (goto-char 2)
+      (run-hooks 'post-command-hook)
+      (narrow-to-region 5 (point-max))
+      (goto-char (point-max))
+      (run-hooks 'post-command-hook)
+      (should (= (point-min) 5))
+      (should (= (point) (point-max)))
+      (widen)
+      (should (eq (get-text-property 1 'display) image)))))
+
+(ert-deftest agent-ide-latex-disabling-preview-clears-revealed-state ()
+  (with-temp-buffer
+    (insert "$x$\ndraft")
+    (setq-local agent-ide--session
+                (agent-ide--make-session :buffer (current-buffer)
+                 :input-prompt-start-marker (copy-marker 5)))
+    (agent-ide-latex-test--apply-preview 1 4 '(image :type svg :data "test"))
+    (goto-char 2)
+    (run-hooks 'post-command-hook)
+    (let ((agent-ide-latex-preview nil))
+      (agent-ide-preview-latex))
+    (goto-char (point-max))
+    (run-hooks 'post-command-hook)
+    (should-not agent-ide-latex--revealed)
+    (should-not (text-property-not-all 1 (point-max) 'display nil))
+    (should-not (get-text-property 1 'agent-ide-latex-preview))))
+
 (ert-deftest agent-ide-latex-refresh-retains-pending-conversion-and-draft ()
   (agent-ide-latex-test--isolated
     (cl-letf (((symbol-function 'agent-ide-latex--settings)
