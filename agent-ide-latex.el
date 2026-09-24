@@ -1,7 +1,7 @@
-;;; agent-ide-latex.el --- Org-backed formula previews -*- lexical-binding: t; -*-
+;;; agent-ide-latex.el --- Asynchronous TeX formula previews -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Recognize Markdown math and render it using Org in an isolated batch Emacs.
+;; Render Markdown math with asynchronous TeX and image converter processes.
 ;; Display properties preserve source text and work in inline viewport strings.
 
 ;;; Code:
@@ -9,21 +9,15 @@
 (require 'cl-lib)
 (require 'color)
 (require 'image)
-(require 'json)
 (require 'subr-x)
 (require 'agent-ide-core)
-
-(defvar org-preview-latex-process-alist)
-(defvar org-format-latex-header)
-(defvar org-latex-compiler)
-(declare-function org-create-formula-image "org")
 
 (defcustom agent-ide-latex-preview t
   "Whether complete math fragments are automatically previewed."
   :type 'boolean :group 'agent-ide)
 
 (defcustom agent-ide-latex-process 'xelatex
-  "Org preview process used for formulas.
+  "TeX and image conversion pipeline used for formulas.
 The default uses XeLaTeX and xeCJK for Chinese text, then dvisvgm for SVG."
   :type '(choice (const xelatex) (const dvisvgm) (const dvipng)) :group 'agent-ide)
 
@@ -45,12 +39,13 @@ Use an installed font name or a TeX-discoverable font filename."
   "Functions called with no arguments after an asynchronous preview update.
 They run in the buffer containing the formula source.")
 
-(defconst agent-ide-latex--library
-  (expand-file-name "agent-ide-latex.el"
-                    (file-name-directory (or load-file-name buffer-file-name))))
 (defvar agent-ide-latex--cache (make-hash-table :test 'equal))
 (defvar agent-ide-latex--queue nil)
 (defvar agent-ide-latex--process nil)
+(cl-defstruct (agent-ide-latex--job (:constructor agent-ide-latex--make-job))
+  key directory output log-buffer stages process timer finished)
+(defvar agent-ide-latex--job nil
+  "Active conversion, including both TeX and image conversion stages.")
 (defvar agent-ide-latex--background-render nil
   "Non-nil while scheduling formula previews for existing history.")
 (defvar-local agent-ide-latex--revealed nil
@@ -176,7 +171,7 @@ intact.  Each preview has its own identity even when images are shared."
 
 (defun agent-ide-latex--cache-key (source settings)
   "Return a cache key for SOURCE and SETTINGS using exact RGB conversion."
-  (secure-hash 'sha256 (prin1-to-string (cons 'exact-rgb-v1 (cons source settings)))))
+  (secure-hash 'sha256 (prin1-to-string (cons 'direct-tex-v1 (cons source settings)))))
 
 (defun agent-ide-latex--upgrade-color-cache ()
   "Migrate plain monochrome SVGs from the terminal-palette cache.
@@ -423,122 +418,144 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
     (setq agent-ide-latex--process nil)
     (agent-ide-latex--start-next)))
 
+(defun agent-ide-latex--document (source settings)
+  "Build a self-contained TeX document for SOURCE and SETTINGS."
+  (pcase-let* ((`(,engine ,_scale ,color . ,rest) settings)
+               (rgb (or (agent-ide-latex--hex-rgb color)
+                        (error "Invalid formula color: %s" color))))
+    (concat
+     "\\documentclass[10pt]{article}\n"
+     "\\usepackage{amsmath,amssymb,xcolor}\n"
+     (if (eq engine 'xelatex)
+         (format "\\usepackage{xeCJK}\n\\setCJKmainfont{%s}\n"
+                 (or (car rest) agent-ide-latex-cjk-font))
+       "\\usepackage[T1]{fontenc}\n\\usepackage[utf8]{inputenc}\n")
+     "\\pagestyle{empty}\n\\setlength{\\textwidth}{18cm}\n"
+     "\\setlength{\\parindent}{0pt}\n\\begin{document}\n"
+     "\\definecolor{agentideforeground}{rgb}{"
+     (mapconcat (lambda (value) (format "%.8f" value)) rgb ",")
+     "}\n{\\color{agentideforeground}\n"
+     source "\n}\n\\end{document}\n")))
+
+(defun agent-ide-latex--stages (settings)
+  "Return (ARGV OUTPUT) stages for SETTINGS, relative to the job directory."
+  (let ((engine (car settings)) (scale (nth 1 settings)))
+    (unless (memq engine '(xelatex dvisvgm dvipng))
+      (error "Unsupported formula preview process: %s" engine))
+    (unless (and (numberp scale) (> scale 0))
+      (error "Formula scale must be positive"))
+    (let ((intermediate (if (eq engine 'xelatex) "formula.xdv" "formula.dvi")))
+      (list
+       (list (append (if (eq engine 'xelatex) '("xelatex" "-no-pdf") '("latex"))
+                     '("-no-shell-escape" "-halt-on-error" "-interaction=nonstopmode"
+                       "-output-directory" "." "formula.tex"))
+             intermediate)
+       (if (eq engine 'dvipng)
+           (list (list "dvipng" "-D" (number-to-string (max 1 (round (* 140 scale))))
+                       "-T" "tight" "-bg" "Transparent" "-p" "1" "-l" "1"
+                       "-o" "formula.png" intermediate)
+                 "formula.png")
+         ;; Retain the previous SVG preview size, including its 1.7 adjustment.
+         (list (list "dvisvgm" "--no-fonts" "--exact-bbox" "--page=1"
+                     (format "--scale=%s" (* 1.7 scale))
+                     "--output=formula.svg" intermediate)
+               "formula.svg"))))))
+
+(defun agent-ide-latex--finish-job (job success &optional diagnostic)
+  "Finish JOB exactly once with SUCCESS, optionally recording DIAGNOSTIC."
+  (unless (agent-ide-latex--job-finished job)
+    (setf (agent-ide-latex--job-finished job) t)
+    (when-let* ((timer (agent-ide-latex--job-timer job))) (cancel-timer timer))
+    (when-let* ((process (agent-ide-latex--job-process job)))
+      ;; Disable the sentinel before terminating a timed-out child: its later
+      ;; exit notification must not finish twice or start another converter.
+      (set-process-sentinel process #'ignore)
+      (when (process-live-p process) (delete-process process)))
+    (when (and diagnostic (buffer-live-p (agent-ide-latex--job-log-buffer job)))
+      (with-current-buffer (agent-ide-latex--job-log-buffer job)
+        (goto-char (point-max))
+        (insert "\n! " diagnostic "\n")))
+    (when (eq job agent-ide-latex--job)
+      (setq agent-ide-latex--job nil))
+    (agent-ide-latex--complete
+     (agent-ide-latex--job-key job) (agent-ide-latex--job-directory job)
+     (agent-ide-latex--job-output job) (agent-ide-latex--job-log-buffer job) success)))
+
+(defun agent-ide-latex--run-stage (job)
+  "Start JOB's next external process without blocking the Emacs event loop."
+  (unless (agent-ide-latex--job-finished job)
+    (if-let* ((stage (pop (agent-ide-latex--job-stages job))))
+        (condition-case err
+            (let* ((default-directory (file-name-as-directory (agent-ide-latex--job-directory job)))
+                   (process-environment
+                    (append (list "openin_any=p" "openout_any=p" "shell_escape=f"
+                                  (concat "TEXMFOUTPUT=" default-directory)
+                                  (concat "PATH=" (mapconcat #'identity
+                                                            (delq nil (copy-sequence exec-path))
+                                                            path-separator)))
+                            process-environment))
+                   (command (car stage))
+                   (expected (expand-file-name (cadr stage) default-directory))
+                   (process
+                    (make-process
+                     :name "agent-ide-latex" :buffer (agent-ide-latex--job-log-buffer job)
+                     :noquery t :coding 'utf-8-unix :connection-type 'pipe
+                     :command command
+                     :sentinel
+                     (lambda (child _event)
+                       (when (and (not (agent-ide-latex--job-finished job))
+                                  (eq child (agent-ide-latex--job-process job))
+                                  (memq (process-status child) '(exit signal)))
+                         (if (and (eq (process-status child) 'exit)
+                                  (= (process-exit-status child) 0)
+                                  (file-exists-p expected))
+                             (agent-ide-latex--run-stage job)
+                           (agent-ide-latex--finish-job
+                            job nil (format "%s failed (%s %s); expected %s"
+                                            (car command) (process-status child)
+                                            (process-exit-status child)
+                                            (file-name-nondirectory expected)))))))))
+              (setf (agent-ide-latex--job-process job) process)
+              (setq agent-ide-latex--process process))
+          (error (agent-ide-latex--finish-job job nil (error-message-string err))))
+      (agent-ide-latex--finish-job job t))))
+
 (defun agent-ide-latex--start-next ()
-  "Start the next Org worker, allowing only one conversion at a time."
+  "Start the next queued conversion, allowing only one formula at a time."
   (when (and (not agent-ide-latex--process) agent-ide-latex--queue)
     (let* ((key (pop agent-ide-latex--queue))
            (record (gethash key agent-ide-latex--cache))
            (settings (plist-get record :settings))
            (directory (file-truename (make-temp-file "agent-ide-latex-" t)))
-           (default-directory (file-name-as-directory directory))
-           (input (expand-file-name "request.json" directory))
-           (output (expand-file-name
-                    (concat "formula." (symbol-name (agent-ide-latex--image-type (car settings))))
-                    directory))
-           (log-buffer (generate-new-buffer " *agent-ide-latex-worker*"))
-           (process-environment
-            (cons (concat "PATH=" (mapconcat #'identity (delq nil (copy-sequence exec-path))
-                                             path-separator))
-                  process-environment))
-           timer)
+           (job (agent-ide-latex--make-job
+                 :key key :directory directory
+                 :output (expand-file-name
+                          (concat "formula." (symbol-name (agent-ide-latex--image-type (car settings))))
+                          directory)
+                 :log-buffer (generate-new-buffer " *agent-ide-latex-conversion*"))))
+      (setq agent-ide-latex--job job)
       (condition-case err
           (progn
+            (setf (agent-ide-latex--job-stages job) (agent-ide-latex--stages settings))
             (let ((coding-system-for-write 'utf-8-unix))
-              (write-region
-               (json-serialize `((source . ,(plist-get record :source))
-                                 (output . ,output) (process . ,(symbol-name (car settings)))
-                                 (scale . ,(nth 1 settings)) (foreground . ,(nth 2 settings))
-                                 (cjkFont . ,(nth 3 settings))))
-               nil input nil 'silent))
-            (setq agent-ide-latex--process
-                  (make-process
-                   :name "agent-ide-latex" :buffer log-buffer :noquery t
-                   :coding 'utf-8-unix
-                   :connection-type 'pipe
-                   :command (list (expand-file-name invocation-name invocation-directory)
-                                  "-Q" "--batch" "-L" (file-name-directory agent-ide-latex--library)
-                                  "-l" agent-ide-latex--library
-                                  "--eval" (format "(agent-ide-latex--worker %S)" input))
-                   :sentinel
-                   (lambda (process _event)
-                     (when (memq (process-status process) '(exit signal))
-                       (when timer (cancel-timer timer))
-                       (agent-ide-latex--complete
-                        key directory output log-buffer (= (process-exit-status process) 0))))))
-            (setq timer (run-at-time
-                         agent-ide-latex-timeout nil
-                         (lambda (process)
-                           (when (process-live-p process)
-                             (with-current-buffer log-buffer
-                               (goto-char (point-max))
-                               (insert (format "\n! Conversion timed out after %s seconds.\n"
-                                               agent-ide-latex-timeout)))
-                             (delete-process process)))
-                         agent-ide-latex--process)))
-        (error
-         (message "Agent IDE formula preview: %s" (error-message-string err))
-         (with-current-buffer log-buffer
-           (goto-char (point-max))
-           (insert "\n! " (error-message-string err) "\n"))
-         (agent-ide-latex--complete key directory output log-buffer nil))))))
+              (write-region (agent-ide-latex--document (plist-get record :source) settings)
+                            nil (expand-file-name "formula.tex" directory) nil 'silent))
+            ;; One deadline covers both stages, including a hung converter.
+            (setf (agent-ide-latex--job-timer job)
+                  (run-at-time agent-ide-latex-timeout nil
+                               #'agent-ide-latex--finish-job job nil
+                               (format "Conversion timed out after %s seconds."
+                                       agent-ide-latex-timeout)))
+            (agent-ide-latex--run-stage job))
+        (error (agent-ide-latex--finish-job job nil (error-message-string err)))))))
 
-(defun agent-ide-latex--worker (request-file)
-  "Render REQUEST-FILE using Org in a separate, clean Emacs process."
-  (require 'org)
-  (require 'ox-latex)
-  (let* ((request (with-temp-buffer
-                    (insert-file-contents request-file)
-                    (json-parse-buffer :object-type 'alist)))
-         (type (intern (alist-get 'process request)))
-         (org-latex-compiler (if (eq type 'xelatex) "xelatex" "pdflatex"))
-         (org-format-latex-header
-          (if (eq type 'xelatex)
-              (concat org-format-latex-header "\n\\usepackage{xeCJK}\n\\setCJKmainfont{"
-                      (or (alist-get 'cjkFont request) agent-ide-latex-cjk-font) "}\n")
-            org-format-latex-header))
-         (default-directory (file-name-directory request-file))
-         (temporary-file-directory default-directory)
-         (shell-file-name "/bin/sh")
-         (shell-command-switch "-c")
-         (process-environment (append (list "openin_any=p" "openout_any=p" "shell_escape=f"
-                                            (concat "TEXMFOUTPUT=" default-directory))
-                                      process-environment))
-         (processes (copy-tree org-preview-latex-process-alist))
-         ;; Define the XDV pipeline here for Org versions without that entry.
-         (org-preview-latex-process-alist
-          (if (eq type 'xelatex)
-              (cons (cons 'xelatex
-                          (plist-put (copy-tree (cdr (assq 'dvisvgm processes)))
-                                     :image-input-type "xdv"))
-                    processes)
-            processes))
-         (entry (assq type org-preview-latex-process-alist)))
-    ;; Reuse Org's preamble, packages, colors, scale and image conversion.
-    (unless (memq type '(xelatex dvisvgm dvipng)) (error "Unsupported formula preview process"))
-    (when (eq type 'xelatex)
-      (setcdr entry (plist-put (cdr entry) :programs '("xelatex" "dvisvgm"))))
-    (setcdr entry (plist-put (cdr entry) :latex-compiler
-                            (if (eq type 'xelatex)
-                                '("xelatex -no-pdf -no-shell-escape -halt-on-error -interaction nonstopmode -output-directory %o %f")
-                              '("latex -no-shell-escape -halt-on-error -interaction nonstopmode -output-directory %o %f"))))
-    (condition-case err
-        (let ((org-color-format (symbol-function 'org-latex-color-format)))
-          ;; Org normally calls `color-values', which approximates even hex
-          ;; colors using the terminal palette in a --batch worker.
-          (cl-letf (((symbol-function 'org-latex-color-format)
-                     (lambda (color)
-                       (if-let* ((rgb (agent-ide-latex--hex-rgb color)))
-                           (mapconcat (lambda (v) (format "%.8f" v)) rgb ",")
-                         (funcall org-color-format color)))))
-            (org-create-formula-image
-             (alist-get 'source request) (alist-get 'output request)
-             (list :foreground (alist-get 'foreground request) :background "Transparent"
-                   :scale (alist-get 'scale request)) t type)))
-      (error
-       (when-let* ((buffer (get-buffer "*Org Preview LaTeX Output*")))
-         (princ (with-current-buffer buffer (buffer-string))))
-       (princ (concat "\n! " (error-message-string err) "\n"))
-       (kill-emacs 1)))))
+(defun agent-ide-latex--shutdown ()
+  "Stop conversion and release its temporary files when Emacs exits."
+  (setq agent-ide-latex--queue nil)
+  (when agent-ide-latex--job
+    (agent-ide-latex--finish-job agent-ide-latex--job nil "Emacs is exiting")))
+
+(add-hook 'kill-emacs-hook #'agent-ide-latex--shutdown)
 
 ;;;###autoload
 (defun agent-ide-latex-show-error ()

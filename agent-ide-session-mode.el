@@ -391,6 +391,10 @@ Full URLs open with `browse-url'; file paths open with `find-file'."
   (interactive)
   (cond
    ((when-let* ((button (button-at (point)))
+                ((button-get button 'agent-ide-media)))
+      (button-activate button)
+      t))
+   ((when-let* ((button (button-at (point)))
                 (url (button-get button 'agent-ide-url)))
       (agent-ide-renderer-open-url url)
       t))

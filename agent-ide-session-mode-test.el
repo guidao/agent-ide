@@ -885,6 +885,56 @@
                                          'display) image))
           (should (equal (agent-ide-renderer-current-input session) "$x$")))))))
 
+(ert-deftest agent-ide-transcript-image-block-renders-in-expanded-output ()
+  "Nested ACP tool images share the Markdown media renderer."
+  (with-temp-buffer
+    (let* ((data (with-temp-buffer
+                   (set-buffer-multibyte nil)
+                   (insert-file-contents-literally
+                    (expand-file-name "assets/agent-ide-icon.png" agent-ide-renderer--directory))
+                   (base64-encode-string (buffer-string) t)))
+           (content `[((type . "content")
+                       (content . ((type . "image") (mimeType . "image/png") (data . ,data))))]))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+        (agent-ide-renderer--insert-expanded-output (agent-ide-transcript--content-text content))
+        (should (= 1 (length agent-ide-media--items)))
+        (let ((start (overlay-start (car agent-ide-media--items))))
+          (should (eq (car-safe (get-text-property start 'display)) 'image)))))))
+
+(ert-deftest agent-ide-session-media-stream-preserves-input-and-read-only ()
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((session (agent-ide-session-mode-test--session))
+          (agent-ide-latex-preview nil))
+      (setq-local agent-ide--session session)
+      (agent-ide-renderer-initialize-buffer session)
+      (agent-ide-renderer-create-prompt session)
+      (insert "draft")
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+        (agent-ide-renderer-append-stream-chunk session 'message
+                                                "![icon](assets/agent-ide-icon.png")
+        (agent-ide-renderer-append-stream-chunk session 'message ")")
+        (agent-ide-renderer-append-stream-chunk session 'message "\nmore text")
+        (should (= 1 (length agent-ide-media--items)))
+        (should (equal "draft" (agent-ide-renderer-current-input session)))
+        (goto-char (overlay-start (car agent-ide-media--items)))
+        (should (eq (car-safe (get-text-property (point) 'display)) 'image))
+        (should-error (insert "edit") :type 'buffer-read-only)
+        (agent-ide-preview-media)
+        (should (equal "draft" (agent-ide-renderer-current-input session)))))))
+
+(ert-deftest agent-ide-follow-media-uses-canvas-action ()
+  (with-temp-buffer
+    (agent-ide-session-mode)
+    (let ((agent-ide-media-inline-video nil) (inhibit-read-only t) opened)
+      (insert "[video](https://example.test/clip.mp4)")
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'agent-ide-media--open) (lambda (_button) (setq opened t))))
+        (agent-ide-renderer-render-markdown-region 1 (point-max))
+        (goto-char 1)
+        (agent-ide-follow-thing-at-point)
+        (should opened)))))
+
 (provide 'agent-ide-session-mode-test)
 
 ;;; agent-ide-session-mode-test.el ends here

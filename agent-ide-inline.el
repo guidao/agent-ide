@@ -409,7 +409,11 @@ the reference context (region, line, defun, window, buffer)."
          (ov (make-overlay point point buffer nil t)))
     (with-current-buffer src
       (text-mode)
+      (setq-local default-directory (agent-ide-session-directory session))
+      (setq-local agent-ide-media-inline-video nil)
       (valign-mode 1)
+      (add-hook 'agent-ide-media-updated-functions
+                (lambda () (agent-ide-inline--response-overlay-render ov)) nil t)
       (add-hook 'agent-ide-latex-updated-functions
                 (lambda () (agent-ide-inline--response-overlay-render ov)) nil t)
       (buffer-disable-undo))

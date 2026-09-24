@@ -172,11 +172,33 @@ The header shows: an animated Agent IDE icon · **model name** · **project dire
 
 - **Markdown rendering** — code fences (syntax-highlighted), inline code, bold/italic, links, headings, and pipe tables (via `valign`).
 - **Streaming messages** — agent text appears word-by-word, markdown-rendered as it arrives.
+- **Media previews** — Markdown images render inline; GIF/APNG, animated WebP and video links use `canvas-video`. ACP image content blocks also render in messages and expanded tool output.
 - **Thinking blocks** — agent reasoning is shown inside foldable blocks (collapsed by default).
 - **Tool calls** — each tool invocation gets a compact summary with expandable output; diffs are syntax-highlighted.
 - **Permission prompts** — inline buttons plus cursor-independent shortcuts: `C-c C-a` allows once, `C-u C-c C-a` always allows, `C-c C-d` declines, and `C-c C-p` shows every option.
 - **Plan rendering** — when the agent produces a plan, entries are listed inline.
 - **Read-only transcript** — all agent output is frozen; only the current prompt is editable.
+
+Use `![description](path-or-url)` for images and animations, or
+`[watch](clip.mp4)` for video. Local paths resolve against the session project;
+paths containing spaces can use `![description](<images/my picture.png>)`.
+HTTP(S) images download asynchronously; `data:image/...;base64,...` also works.
+Previews preserve the original Markdown when copied or saved.
+
+Media previews require graphical Emacs. Static formats depend on Emacs image
+support. Animations and videos additionally require `canvas-video` on `load-path`,
+its compiled libmpv module, and a Canvas-capable Emacs. Videos start paused;
+animations loop silently. Use the Canvas controls or its `C-c C-v` prefix for
+playback. `C-c C-o` opens the image or a dedicated Canvas player. Missing files
+and unavailable decoders leave readable links with an error message.
+The inline response viewport displays static images and offers Canvas playback
+links for animations/videos; embedded players appear in the session transcript.
+
+Set `agent-ide-media-preview` to disable previews, or adjust
+`agent-ide-media-max-width` / `agent-ide-media-max-height` (default 640 × 400).
+Run `M-x agent-ide-preview-media` to refresh existing messages after changing
+settings or installing Canvas. Closing the buffer or removing a media link
+releases its downloads, temporary files and player.
 
 ### Session sidebar
 
@@ -214,7 +236,7 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-sidebar-auto-show` | `nil` | Auto-show on session create when enabled; ignored for refresh while user-dismissed |
 | `agent-ide-sidebar-confirm-kill` | `t` | Confirm before kill |
 | `agent-ide-latex-preview` | `t` | Preview complete math fragments in graphical Emacs |
-| `agent-ide-latex-process` | `xelatex` | Org conversion process: `xelatex` (Chinese-capable SVG), `dvisvgm` (SVG) or `dvipng` (PNG) |
+| `agent-ide-latex-process` | `xelatex` | Conversion pipeline: `xelatex` (Chinese-capable SVG), `dvisvgm` (SVG) or `dvipng` (PNG) |
 | `agent-ide-latex-cjk-font` | `Songti SC` on macOS; `FandolSong-Regular.otf` elsewhere | Chinese font for XeLaTeX |
 | `agent-ide-latex-scale` | `1.3` | Formula image scale |
 | `agent-ide-latex-timeout` | `20` | Maximum seconds per formula conversion |
@@ -227,10 +249,14 @@ font selected by `agent-ide-latex-cjk-font`. The default font is Songti SC on
 macOS and the TeX Live font FandolSong-Regular.otf on other systems.
 This supports Chinese inside formulas, for example `\(x^2\text{，指数为二}\)`.
 
-Org's LaTeX preview engine runs in a background Emacs process using its default
-preamble plus the xeCJK package and selected Chinese font. It does not load your
-Org configuration. For the original non-CJK pipeline, select `dvisvgm` with
-`latex`, or `dvipng` with `latex` and PNG support.
+Formula previews launch XeLaTeX and then dvisvgm as asynchronous external
+processes. They do not depend on Org or start another Emacs. Agent output and
+editing remain responsive while compilation runs. A built-in preamble loads
+`amsmath`, `amssymb` and `xcolor`, plus `xeCJK` and the selected Chinese font for
+XeLaTeX. For formulas without Chinese, select `dvisvgm` with `latex`, or `dvipng`
+with `latex` and PNG support. The timeout covers both compilation and image
+conversion; errors retain diagnostics and release temporary files before the
+next queued formula starts.
 
 Use `$x^2$` or `\(x^2\)` for inline math, and `$$...$$` or `\[...\]` for
 display math. Previews appear after the closing delimiter arrives, including in
@@ -317,7 +343,7 @@ Opens each session in a right-side window at 42% width.
 | `agent-ide-reload-all` | — | Reload all project files in dependency order |
 | `agent-ide-reload-last` | — | Reload the most recently loaded file |
 
-File load order: `core` → `history` → `protocol` → `latex` → `renderer` → `session-mode` → `session` → `transcript` → `sidebar` → `inline` → `agent-ide`.
+File load order: `core` → `history` → `protocol` → `latex` → `media` → `renderer` → `session-mode` → `session` → `transcript` → `sidebar` → `inline` → `agent-ide`.
 
 Run restoration tests with installed `acp` and `valign` packages:
 
@@ -337,8 +363,18 @@ Run formula preview tests with:
 emacs -Q --batch -L . -l agent-ide-latex-test.el -f ert-run-tests-batch-and-exit
 ```
 
-The SVG/PNG integration tests use local Org and TeX tools, and skip when those
+The SVG/PNG integration tests use local TeX tools, and skip when those
 tools or image types are unavailable. They do not contact an agent service.
+
+Run media tests with:
+
+```sh
+emacs -Q --batch -L . -l agent-ide-media-test.el -f ert-run-tests-batch-and-exit
+```
+
+Add the `canvas-video` directory with `-L` to
+exercise its adapter and lifecycle. The native GIF test requires graphical
+Emacs and `AGENT_IDE_TEST_GIF` pointing to a local animation; batch tests skip it.
 
 ## Architecture
 
@@ -347,7 +383,8 @@ agent-ide.el              Entry point, defcustom, require all
 ├── agent-ide-core.el     Session struct, helpers, buffer management
 ├── agent-ide-history.el  Persistent session index and completion candidates
 ├── agent-ide-renderer.el Transcript rendering, markdown, diff, folds, faces
-├── agent-ide-latex.el    Math recognition and asynchronous Org formula previews
+├── agent-ide-latex.el    Math recognition and asynchronous TeX formula previews
+├── agent-ide-media.el    Image downloads, previews and canvas-video integration
 ├── agent-ide-protocol.el ACP bridge (init, prompt, cancel, fs ops)
 ├── agent-ide-session-mode.el Major mode, keymaps, completion, edit guard
 ├── agent-ide-transcript.el   ACP event dispatch (notifications, requests)

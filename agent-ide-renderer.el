@@ -18,6 +18,7 @@
 (require 'url-parse)
 (require 'agent-ide-core)
 (require 'agent-ide-latex)
+(require 'agent-ide-media)
 
 (defconst agent-ide-renderer--directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
@@ -765,6 +766,7 @@ highlighting and fixed-pitch text, matching the codex-ide transcript style."
 (defun agent-ide-renderer--markdown-code-content-p (start end)
   "Return non-nil when START..END overlaps code or math source."
   (or (text-property-not-all start end 'agent-ide-markdown-code-content nil)
+      (text-property-not-all start end 'agent-ide-media nil)
       (text-property-not-all start end 'agent-ide-latex nil)))
 
 (defun agent-ide-renderer--render-markdown-inline-pattern
@@ -933,6 +935,7 @@ Table alignment is handled by `valign-mode'."
             (valign-region start (marker-position end-marker))
           (error nil)))
       (agent-ide-latex-render formulas)
+      (agent-ide-media-render start (marker-position end-marker))
       (set-marker end-marker nil))))
 
 (cl-defun agent-ide-renderer--insert-foldable-block

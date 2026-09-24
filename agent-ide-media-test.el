@@ -1,0 +1,273 @@
+;;; agent-ide-media-test.el --- Media rendering tests -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'agent-ide-renderer)
+
+(defconst agent-ide-media-test--png
+  (expand-file-name "assets/agent-ide-icon.png" agent-ide-renderer--directory))
+
+(defmacro agent-ide-media-test--buffer (&rest body)
+  (declare (indent 0) (debug t))
+  `(with-temp-buffer
+     (let ((agent-ide-latex-preview nil))
+       (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+         ,@body))))
+
+(defun agent-ide-media-test--render ()
+  (agent-ide-renderer-render-markdown-region (point-min) (point-max)))
+
+(ert-deftest agent-ide-media-static-streaming-and-source-preservation ()
+  (agent-ide-media-test--buffer
+    (insert "![icon](assets/agent-ide-icon.png")
+    (agent-ide-media-test--render)
+    (should-not agent-ide-media--items)
+    (goto-char (point-max)) (insert ")")
+    (let ((source (buffer-string)))
+      (agent-ide-media-test--render)
+      (let ((item (car agent-ide-media--items)) (image (get-text-property 1 'display)))
+        (should (eq (car-safe image) 'image))
+        (dotimes (_ 3) (agent-ide-media-test--render))
+        (should (eq item (car agent-ide-media--items)))
+        (should (= 1 (length agent-ide-media--items)))
+        (should (eq image (get-text-property 1 'display)))
+        (should (equal source (buffer-substring-no-properties 1 (point-max))))
+        (goto-char (point-max)) (insert " trailing text")
+        (agent-ide-media-test--render)
+        (should-not (get-text-property (1- (point-max)) 'display))))))
+
+(ert-deftest agent-ide-media-skips-code-math-and-escaped-markup ()
+  (dolist (source '("`![x](x.png)`" "`` ![x](x.png) ``"
+                    "```markdown\n![x](x.png)\n```"
+                    "~~~markdown\n![x](x.png)\n~~~"
+                    "```markdown\n![x](x.png)" "`![x](x.png)"
+                    "\\![x](x.png)" "\\[x](x.mp4)" "$![x](x.png)$"))
+    (agent-ide-media-test--buffer
+      (insert source)
+      (agent-ide-media-test--render)
+      (should-not agent-ide-media--items))))
+
+(ert-deftest agent-ide-media-parses-paths-and-titles ()
+  (dolist (pair '(("![a](<dir/my image.png> \"title\")" . "dir/my image.png")
+                  ("![a](dir/a(b).png)" . "dir/a(b).png")
+                  ("![a](dir/a\\(b\\).png 'title')" . "dir/a(b).png")
+                  ("![](a.png)" . "a.png")))
+    (agent-ide-media-test--buffer
+      (let (loaded)
+        (cl-letf (((symbol-function 'agent-ide-media--load)
+                   (lambda (_item target) (setq loaded target))))
+          (insert (car pair)) (agent-ide-media-test--render)
+          (should (equal loaded (cdr pair))))))))
+
+(ert-deftest agent-ide-media-resolves-project-and-file-urls ()
+  (with-temp-buffer
+    (setq-local agent-ide--session (agent-ide--make-session :directory "/tmp/project/"))
+    (should (equal (agent-ide-media--source "images/a%20b.png") "/tmp/project/images/a b.png"))
+    (should (equal (agent-ide-media--source "file:///tmp/a.png") "/tmp/a.png"))
+    (should-error (agent-ide-media--source "file://server/a.png"))
+    (should-error (agent-ide-media--source "javascript:alert(1)"))))
+
+(ert-deftest agent-ide-media-failure-keeps-readable-link ()
+  (agent-ide-media-test--buffer
+    (insert "![missing](/nonexistent/agent-ide.png)")
+    (agent-ide-media-test--render)
+    (should (stringp (get-text-property 1 'display)))
+    (should (button-at 1))
+    (should (= 1 (length agent-ide-media--items)))
+    (agent-ide-media-test--render)
+    (should (= 1 (length agent-ide-media--items)))))
+
+(ert-deftest agent-ide-media-terminal-and-disabled-do-not-fetch ()
+  (dolist (graphical '(nil t))
+    (with-temp-buffer
+      (let ((agent-ide-media-preview (not graphical)))
+        (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) graphical))
+                  ((symbol-function 'url-retrieve) (lambda (&rest _) (ert-fail "Unexpected fetch"))))
+          (insert "![x](https://example.test/x.png)")
+          (agent-ide-media-test--render)
+          (should-not agent-ide-media--items))))))
+
+(ert-deftest agent-ide-media-data-url-lifecycle ()
+  (agent-ide-media-test--buffer
+    (let ((data (with-temp-buffer
+                  (set-buffer-multibyte nil)
+                  (insert-file-contents-literally agent-ide-media-test--png)
+                  (base64-encode-string (buffer-string) t))))
+      (insert (format "![x](data:image/png;base64,%s)" data))
+      (agent-ide-media-test--render)
+      (should (eq (car-safe (get-text-property 1 'display)) 'image))
+      (let ((file (overlay-get (car agent-ide-media--items) 'temporary-file)))
+        (should (file-exists-p file))
+        (erase-buffer)
+        (should-not agent-ide-media--items)
+        (should-not (file-exists-p file))))))
+
+(ert-deftest agent-ide-media-remote-completion-and-stale-response ()
+  (dolist (stale '(nil t))
+    (agent-ide-media-test--buffer
+      (let (callback item)
+        (cl-letf (((symbol-function 'url-retrieve)
+                   (lambda (_url function args &rest _)
+                     (setq callback function item (car args)) nil)))
+          (insert "![remote](https://example.test/x.png)")
+          (agent-ide-media-test--render)
+          (agent-ide-media-test--render)
+          (when stale (erase-buffer))
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert "HTTP/1.1 200 OK\n\n")
+            (backward-char)
+            (setq-local url-http-end-of-headers (point-marker)
+                        url-http-response-status 200)
+            (goto-char (point-max))
+            (insert-file-contents-literally agent-ide-media-test--png)
+            (funcall callback nil item))
+          (if stale
+              (should-not (overlay-get item 'temporary-file))
+            (should (eq (car-safe (get-text-property 1 'display)) 'image))))))))
+
+(ert-deftest agent-ide-media-remote-error-fallback ()
+  (agent-ide-media-test--buffer
+    (let (callback item)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (_url function args &rest _)
+                   (setq callback function item (car args)) nil)))
+        (insert "![remote](https://example.test/x.png)")
+        (agent-ide-media-test--render)
+        (with-temp-buffer
+          (setq-local url-http-response-status 404)
+          (funcall callback '(:error (error "404")) item))
+        (should (string-match-p "download failed" (get-text-property 1 'display)))
+        (should-not (overlay-get item 'temporary-file))))))
+
+(ert-deftest agent-ide-media-dynamic-routing-and-deduplication ()
+  (dolist (markup '("![animation](https://example.test/a.gif)"
+                    "[video](https://example.test/a.MP4?x=1)"
+                    "![video](/tmp/a.webm)"))
+    (agent-ide-media-test--buffer
+      (let ((calls 0))
+        (cl-letf (((symbol-function 'agent-ide-media--canvas)
+                   (lambda (_item _source) (cl-incf calls))))
+          (insert markup)
+          (dotimes (_ 3) (agent-ide-media-test--render))
+          (should (= calls 1))
+          (should (overlay-get (car agent-ide-media--items) 'video)))))))
+
+(ert-deftest agent-ide-media-hidden-viewport-does-not-start-player ()
+  (agent-ide-media-test--buffer
+    (let ((agent-ide-media-inline-video nil))
+      (insert "![animation](https://example.test/a.gif)")
+      (cl-letf (((symbol-function 'agent-ide-media--canvas)
+                 (lambda (&rest _) (ert-fail "Hidden video started"))))
+        (agent-ide-media-test--render)
+        (should (string-match-p "canvas-video" (get-text-property 1 'display)))))))
+
+(ert-deftest agent-ide-media-canvas-lifecycle-with-real-adapter ()
+  (skip-unless (require 'canvas-video nil t))
+  (agent-ide-media-test--buffer
+    (let ((created 0) (closed 0) commands)
+      (cl-letf (((symbol-function 'canvas-video--check-display) #'ignore)
+                ((symbol-function 'canvas-video--native-create)
+                 (lambda (&rest _) (cl-incf created)))
+                ((symbol-function 'canvas-video--native-close)
+                 (lambda (&rest _) (cl-incf closed)))
+                ((symbol-function 'canvas-video--native-command)
+                 (lambda (_player args) (push (append args nil) commands)))
+                ((symbol-function 'canvas-video--update-controls) #'ignore))
+        (insert "![animation](https://example.test/a.gif)")
+        (dotimes (_ 3) (agent-ide-media-test--render))
+        (should (= created 1))
+        (should (= 1 (length canvas-video--instances)))
+        (should (member '("set" "loop-file" "inf") commands))
+        (should (member '("set" "mute" "yes") commands))
+        (should (equal (buffer-substring-no-properties 1 (point-max))
+                       "![animation](https://example.test/a.gif)"))
+        (erase-buffer)
+        (should (= closed 1))
+        (should-not canvas-video--instances)
+        (should-not canvas-video--timer)
+        (should-not agent-ide-media--items)))))
+
+(ert-deftest agent-ide-media-canvas-start-failure-restores-fallback ()
+  (skip-unless (require 'canvas-video nil t))
+  (agent-ide-media-test--buffer
+    (cl-letf (((symbol-function 'canvas-video--check-display) #'ignore)
+              ((symbol-function 'canvas-video--native-create)
+               (lambda (&rest _) (error "Module unavailable")))
+              ((symbol-function 'canvas-video--update-controls) #'ignore))
+      (insert "[video](https://example.test/a.mp4)")
+      (agent-ide-media-test--render)
+      (should (string-match-p "Module unavailable" (get-text-property 1 'display)))
+      (should-not canvas-video--instances)
+      (should-not canvas-video--timer)
+      (should (= 1 (length agent-ide-media--items)))
+      (should (agent-ide-media--intact-p (car agent-ide-media--items))))))
+
+(ert-deftest agent-ide-media-refresh-preserves-source-and-draft ()
+  (agent-ide-media-test--buffer
+    (insert "![image](assets/agent-ide-icon.png)")
+    (agent-ide-media-test--render)
+    (goto-char (point-max))
+    (let ((draft-start (point)))
+      (insert "\nDraft: ![other](draft.png)")
+      (remove-text-properties draft-start (point-max) '(agent-ide-latex-region nil)))
+    (let ((source (buffer-substring-no-properties 1 (point-max))))
+      (agent-ide-preview-media)
+      (should (equal source (buffer-substring-no-properties 1 (point-max))))
+      (should (= 1 (length agent-ide-media--items)))
+      (let ((agent-ide-media-preview nil)) (agent-ide-preview-media))
+      (should-not agent-ide-media--items)
+      (should-not (get-text-property 1 'agent-ide-media))
+      (should-not (eq (car-safe (get-text-property 1 'display)) 'image)))))
+
+(ert-deftest agent-ide-media-native-gif-integration ()
+  "Opt in with AGENT_IDE_TEST_GIF pointing to a local animation."
+  (skip-unless (and (display-graphic-p) (getenv "AGENT_IDE_TEST_GIF")))
+  (require 'canvas-video)
+  (canvas-video--load-module)
+  (agent-ide-media-test--buffer
+    (let ((canvas-video-audio-output "null")
+          (agent-ide-media-max-width 64) (agent-ide-media-max-height 48))
+      (progn
+        (insert (format "![animation](%s)" (getenv "AGENT_IDE_TEST_GIF")))
+        (agent-ide-media-test--render)
+        (should (= 1 (length canvas-video--instances)))
+        (let* ((instance (car canvas-video--instances))
+               (player (canvas-video--instance-player instance))
+               (deadline (+ (float-time) 5)))
+          (while (and (< (plist-get (canvas-video--native-status player) :frames) 2)
+                      (< (float-time) deadline))
+            (sleep-for 0.02))
+          (should (> (plist-get (canvas-video--native-status player) :frames) 1))
+          (should (canvas-video--native-present player (canvas-video--instance-canvas instance)))
+          (canvas-refresh (canvas-video--instance-canvas instance))
+          (agent-ide-media--cleanup)
+          (should-not canvas-video--instances)
+          (should-not canvas-video--timer)
+          (should-error (canvas-video--native-status player)))))))
+
+(ert-deftest agent-ide-media-async-update-preserves-narrowing-and-read-only ()
+  (agent-ide-media-test--buffer
+    (let (item (updates 0))
+      (cl-letf (((symbol-function 'agent-ide-media--load)
+                 (lambda (value _target) (setq item value))))
+        (insert "![x](remote.png)\neditable tail")
+        (agent-ide-media-test--render))
+      (setq-local agent-ide-media-updated-functions (list (lambda () (cl-incf updates))))
+      (put-text-property 1 (overlay-end item) 'read-only t)
+      (goto-char (point-max))
+      (narrow-to-region (overlay-end item) (point-max))
+      (let ((begin (point-min)) (end (point-max)) (position (point)))
+        (agent-ide-media--show item agent-ide-media-test--png)
+        (should (= updates 1))
+        (should (= begin (point-min)))
+        (should (= end (point-max)))
+        (should (= position (point)))
+        (agent-ide-media--status item "Download failed")
+        (should (= updates 2))
+        (should (= begin (point-min))))
+      (widen)
+      (should (string-match-p "Download failed" (get-text-property 1 'display)))
+      (should (get-text-property 1 'read-only)))))
+
+(provide 'agent-ide-media-test)
+;;; agent-ide-media-test.el ends here

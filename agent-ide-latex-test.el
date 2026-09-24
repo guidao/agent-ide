@@ -3,11 +3,14 @@
 (require 'ert)
 (require 'agent-ide-renderer)
 
+(defvar native-comp-enable-subr-trampolines)
+
 (defmacro agent-ide-latex-test--isolated (&rest body)
   (declare (indent 0) (debug t))
   `(let ((agent-ide-latex--cache (make-hash-table :test 'equal))
          (agent-ide-latex--queue nil)
-         (agent-ide-latex--process nil))
+         (agent-ide-latex--process nil)
+         (agent-ide-latex--job nil))
      ,@body))
 
 (defun agent-ide-latex-test--fragments (text)
@@ -285,8 +288,8 @@
           (should-not (get-text-property 11 'agent-ide-latex-key))
           (should (equal (buffer-substring-no-properties 5 (point-max)) "Draft $y$")))))))
 
-(ert-deftest agent-ide-latex-org-worker-integration ()
-  "Exercise real Org/TeX conversions, failure recovery and shared images."
+(ert-deftest agent-ide-latex-tex-conversion-integration ()
+  "Exercise real asynchronous TeX conversions, failure recovery and shared images."
   (skip-unless (and (executable-find "latex") (executable-find "dvisvgm")
                     (image-type-available-p 'svg)))
   (agent-ide-latex-test--isolated
@@ -344,7 +347,7 @@
       (widen)
       (should (equal (get-text-property 1 'display) image)))))
 
-(ert-deftest agent-ide-latex-org-worker-png-integration ()
+(ert-deftest agent-ide-latex-png-conversion-integration ()
   (skip-unless (and (executable-find "latex") (executable-find "dvipng")
                     (image-type-available-p 'png)))
   (agent-ide-latex-test--isolated
@@ -624,7 +627,7 @@
       (should-not (gethash (agent-ide-latex--cache-key source settings) agent-ide-latex--cache)))))
 
 (ert-deftest agent-ide-latex-exact-svg-color-integration ()
-  "Real batch workers preserve theme RGB and explicitly colored formula parts."
+  "Direct TeX conversions preserve theme RGB and explicitly colored formula parts."
   (skip-unless (and (executable-find "latex") (executable-find "xelatex")
                     (executable-find "dvisvgm") (image-type-available-p 'svg)))
   (agent-ide-latex-test--isolated
@@ -640,6 +643,109 @@
               (should (stringp data))
               (should (string-match-p "fill=['\"]#34494a['\"]" data))
               (should (string-match-p "fill=['\"]#f00['\"]" data)))))))))
+
+
+(defun agent-ide-latex-test--wait ()
+  "Wait at most ten seconds for the active test conversion."
+  (let ((deadline (+ (float-time) 10)))
+    (while (and agent-ide-latex--process (< (float-time) deadline))
+      (accept-process-output nil 0.02)))
+  (should-not agent-ide-latex--process)
+  (should-not agent-ide-latex--job))
+
+(ert-deftest agent-ide-latex-direct-processes-without-org-or-synchronous-calls ()
+  "Real rendering must only launch TeX and its converter, with no Org calls."
+  (skip-unless (and (executable-find "latex") (executable-find "dvisvgm")
+                    (image-type-available-p 'svg)))
+  (agent-ide-latex-test--isolated
+    (let ((agent-ide-latex-process 'dvisvgm)
+          (native-comp-enable-subr-trampolines nil)
+          (require-function (symbol-function 'require))
+          (make-process-function (symbol-function 'make-process))
+          commands)
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'require)
+                 (lambda (feature &rest args)
+                   (when (memq feature '(org ox-latex)) (ert-fail "Org dependency"))
+                   (apply require-function feature args)))
+                ((symbol-function 'call-process)
+                 (lambda (&rest _) (ert-fail "Synchronous process")))
+                ((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (push (plist-get args :command) commands)
+                   (apply make-process-function args))))
+        (with-temp-buffer
+          (insert "$\\frac{a}{b}$")
+          (agent-ide-renderer-render-markdown-region 1 (point-max))
+          (should (process-live-p agent-ide-latex--process))
+          (agent-ide-latex-test--wait)
+          (should (eq (car-safe (get-text-property 1 'display)) 'image))
+          (should (equal (mapcar #'car (reverse commands)) '("latex" "dvisvgm"))))))))
+
+(ert-deftest agent-ide-latex-conversion-does-not-block-other-process-output ()
+  "An agent-like process can deliver output while TeX is still running."
+  (agent-ide-latex-test--isolated
+    (let ((make-process-function (symbol-function 'make-process))
+          (agent-ide-latex-timeout 5)
+          (received "") peer)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-ide-latex--settings)
+                     (lambda () '(dvisvgm 1.0 "#000000")))
+                    ((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (apply make-process-function
+                              (plist-put args :command '("/bin/sleep" "10"))))))
+            (with-temp-buffer
+              (insert "$x$")
+              (agent-ide-renderer-render-markdown-region 1 (point-max))
+              (should (process-live-p agent-ide-latex--process))
+              (setq peer (funcall make-process-function :name "formula-test-agent"
+                                  :command '("/usr/bin/printf" "agent output") :noquery t
+                                  :filter (lambda (_process text) (setq received (concat received text)))))
+              (let ((deadline (+ (float-time) 2)))
+                (while (and (not (equal received "agent output")) (< (float-time) deadline))
+                  (accept-process-output nil 0.02)))
+              (should (equal received "agent output"))
+              (should (process-live-p agent-ide-latex--process))))
+        (when (process-live-p peer) (delete-process peer))
+        (when agent-ide-latex--job
+          (agent-ide-latex--finish-job agent-ide-latex--job nil "Test cleanup"))))))
+
+(ert-deftest agent-ide-latex-stage-failures-release-resources ()
+  "Handle spawn failures, missing output, converter errors and converter timeout."
+  (dolist (failure '(spawn missing-output converter timeout))
+    (agent-ide-latex-test--isolated
+      (let ((make-process-function (symbol-function 'make-process))
+            (agent-ide-latex-timeout 0.3)
+            (calls 0) job)
+        (cl-letf (((symbol-function 'agent-ide-latex--settings)
+                   (lambda () '(dvisvgm 1.0 "#000000")))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (setq job agent-ide-latex--job)
+                     (cl-incf calls)
+                     (when (eq failure 'spawn) (error "Test executable unavailable"))
+                     (apply make-process-function
+                            (plist-put args :command
+                                       (cond
+                                        ((eq failure 'missing-output) '("/usr/bin/true"))
+                                        ((= calls 1) '("/bin/sh" "-c" "touch formula.dvi"))
+                                        ((eq failure 'timeout) '("/bin/sleep" "10"))
+                                        (t '("/bin/sh" "-c" "echo converter-failed >&2; exit 9"))))))))
+          (with-temp-buffer
+            (insert "$x$")
+            (agent-ide-renderer-render-markdown-region 1 (point-max))
+            (agent-ide-latex-test--wait)
+            (should-not (get-text-property 1 'display))
+            (should (eq (plist-get (gethash (get-text-property 1 'agent-ide-latex-key)
+                                            agent-ide-latex--cache) :status) 'failed))
+            (should (agent-ide-latex--job-finished job))
+            (should-not (file-exists-p (agent-ide-latex--job-directory job)))
+            (should-not (buffer-live-p (agent-ide-latex--job-log-buffer job)))
+            (should-not (memq (agent-ide-latex--job-timer job) timer-list))
+            (when (eq failure 'timeout)
+              (should (string-match-p "timed out" (get-text-property 1 'help-echo))))
+            (should (= calls (if (memq failure '(spawn missing-output)) 1 2)))))))))
 
 (provide 'agent-ide-latex-test)
 ;;; agent-ide-latex-test.el ends here
