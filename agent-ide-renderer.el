@@ -829,17 +829,35 @@ DELIMITER-GROUPS is a list of match groups to hide."
                              (match-end 2)
                              '(agent-ide-markdown t))))))
 
+(defun agent-ide-renderer--file-location (path)
+  "Return (FILE LINE COLUMN) for PATH, with optional :LINE[:COLUMN].
+Line and column numbers are one-based.  Ignore query and fragment suffixes."
+  (let ((file (car (split-string path "[?#]")))
+        line column)
+    (when (and file
+               (string-match
+                "\\`\\(.+?\\):\\([0-9]+\\)\\(?::\\([0-9]+\\)\\)?\\'" file))
+      (setq line (string-to-number (match-string 2 file))
+            column (when (match-string 3 file)
+                     (string-to-number (match-string 3 file)))
+            file (match-string 1 file)))
+    (list file line column)))
+
 (defun agent-ide-renderer-open-url (url)
-  "Open URL like markdown-mode: full URLs in a browser, paths via find-file."
-  (let* ((struct (url-generic-parse-url url))
-         (full (url-fullness struct))
-         (file (or (car (url-path-and-query struct)) url)))
-    (if full
-        (browse-url url)
+  "Open full URL in a browser, or a local path at optional :LINE[:COLUMN]."
+  (if (url-fullness (url-generic-parse-url url))
+      (browse-url url)
+    ;; Use the original path: URL parsing treats `foo.rs:64' as a scheme.
+    (pcase-let ((`(,file ,line ,column)
+                 (agent-ide-renderer--file-location url)))
       (when (and file (> (length file) 0))
-        (when (string-match "\\`\\([^#?]+\\)" file)
-          (setq file (match-string 1 file)))
-        (find-file file)))))
+        (find-file file)
+        (when line
+          (widen)
+          (goto-char (point-min))
+          (forward-line (max 0 (1- line)))
+          (when column
+            (move-to-column (max 0 (1- column)))))))))
 
 (defun agent-ide-renderer-follow-url-button (button)
   "Follow URL stored on BUTTON."

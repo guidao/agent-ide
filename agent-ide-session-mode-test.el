@@ -317,6 +317,57 @@
               (should (equal opened tmp))))
         (delete-file tmp)))))
 
+(ert-deftest agent-ide-follow-file-locations ()
+  "Plain paths and Markdown buttons open the file at its line and column."
+  (let* ((directory (make-temp-file "agent-ide-location-" t))
+         (file (expand-file-name "xxx.rs" directory)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (dotimes (_ 70) (insert "line content\n")))
+          (dolist (path (list file "xxx.rs" "./xxx.rs"))
+            (dolist (suffix '("" ":64" ":64:3"))
+              (dolist (action '(plain markdown button))
+                (ert-info ((format "%s%s via %s" path suffix action))
+                  (save-window-excursion
+                    (with-temp-buffer
+                      (setq default-directory (file-name-as-directory directory))
+                      (agent-ide-session-mode)
+                      (let ((session (agent-ide-session-mode-test--session)))
+                        (setq-local agent-ide--session session)
+                        (agent-ide-renderer-initialize-buffer session)
+                        (agent-ide-renderer-append-stream-chunk
+                         session 'message
+                         (if (eq action 'plain)
+                             (concat path suffix)
+                           (format "[source](%s%s)" path suffix)))
+                        (goto-char (point-min))
+                        (search-forward (if (eq action 'plain) "xxx" "source"))
+                        (backward-char)
+                        (if (eq action 'button)
+                            (button-activate (button-at (point)))
+                          (agent-ide-follow-thing-at-point))
+                        (should (equal buffer-file-name file))
+                        (unless (equal suffix "")
+                          (should (= (line-number-at-pos) 64))
+                          (should (= (current-column)
+                                     (if (equal suffix ":64:3") 2 0))))))))))))
+      (when-let* ((buffer (get-file-buffer file)))
+        (kill-buffer buffer))
+      (delete-directory directory t))))
+
+(ert-deftest agent-ide-open-url-preserves-network-locations ()
+  "URL ports and numeric path suffixes must still open in the browser."
+  (dolist (url '("https://example.com:8443/source.rs:64"
+                 "https://example.com/source.rs#L64"))
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (target &rest _) (setq opened target)))
+                ((symbol-function 'find-file)
+                 (lambda (&rest _) (ert-fail "URL treated as a local path"))))
+        (agent-ide-renderer-open-url url)
+        (should (equal opened url))))))
+
 (ert-deftest agent-ide-renderer-message-renders-indented-code-fence ()
   "Assistant messages render fenced code blocks after leading whitespace."
   (with-temp-buffer
