@@ -363,31 +363,32 @@ Creates a fresh editable prompt.  Does not send to the agent."
               session `((message . ,(error-message-string err))))))))
 
 (defun agent-ide--resume-entry (entry)
-  "Open or restore the historical session described by ENTRY."
+  "Open or restore a backend session ENTRY with its discovery configuration."
   (agent-ide--cleanup-dead-sessions)
   (let* ((id (map-elt entry 'sessionId))
-         (directory (map-elt entry 'directory))
-         (backend (map-elt entry 'backend))
+         (directory (file-name-as-directory (expand-file-name (map-elt entry 'cwd))))
+         (agent-ide-command (map-elt entry 'command))
+         (agent-ide-environment (map-elt entry 'environment))
+         (agent-ide-mcp-servers (map-elt entry 'mcpServers))
          (existing
           (cl-find-if
            (lambda (session)
              (and (equal id (agent-ide-session-acp-session-id session))
-                  (equal directory (agent-ide-session-directory session))
-                  (equal backend
-                         (agent-ide-history-backend-key
-                          (agent-ide--session-metadata-get session :command)))))
+                  (equal (file-truename directory)
+                         (file-truename (agent-ide-session-directory session)))
+                  (equal agent-ide-command
+                         (agent-ide--session-metadata-get session :command))
+                  (equal agent-ide-environment
+                         (agent-ide--session-metadata-get session :environment))))
            agent-ide--sessions)))
+    (unless agent-ide-command
+      (user-error "Missing backend command for selected session"))
     (unless (file-directory-p directory)
       (user-error "Session directory no longer exists: %s" directory))
-    (unless (or existing
-                (equal backend (agent-ide-history-backend-key agent-ide-command)))
-      (user-error "Configure agent-ide-command for this session's backend (%s) first"
-                  (map-elt entry 'backendName)))
     (let ((session (or existing (agent-ide--create-session directory t))))
+      (agent-ide--session-metadata-put session :title (map-elt entry 'title))
       (unless existing
         (setf (agent-ide-session-acp-session-id session) id)
-        (unless (equal (map-elt entry 'title) "Untitled")
-          (agent-ide--session-metadata-put session :title (map-elt entry 'title)))
         (agent-ide--set-status session "disconnected"))
       (if (and existing
                (not (member (agent-ide-session-status existing) '("disconnected" "failed")))
@@ -397,24 +398,41 @@ Creates a fresh editable prompt.  Does not send to the agent."
       session)))
 
 ;;;###autoload
-(defun agent-ide-resume-history (&optional all-projects directory)
-  "Choose history for DIRECTORY or this project; a prefix uses ALL-PROJECTS."
+(defun agent-ide-resume-history (&optional all-projects directory source-session)
+  "Choose backend history for DIRECTORY or this project.
+A prefix uses ALL-PROJECTS.  Use SOURCE-SESSION's backend configuration,
+or the current session's configuration, otherwise `agent-ide-command'."
   (interactive "P")
-  (let* ((directory (unless all-projects
+  (let* ((source (or source-session (agent-ide--session-for-buffer)))
+         (command (copy-tree (if source
+                                 (agent-ide--session-metadata-get source :command)
+                               agent-ide-command)))
+         (environment (copy-tree (if source
+                                     (agent-ide--session-metadata-get source :environment)
+                                   agent-ide-environment)))
+         (mcp-servers (copy-tree (if source
+                                    (agent-ide--session-metadata-get source :mcp-servers)
+                                  agent-ide-mcp-servers) t))
+         (directory (unless all-projects
                       (or directory
-                          (when-let* ((session (agent-ide--session-for-buffer)))
-                            (agent-ide-session-directory session))
+                          (when source (agent-ide-session-directory source))
                           (agent-ide--working-directory))))
-         (candidates (agent-ide-history-candidates directory)))
+         (entries (progn
+                    (message "Fetching agent sessions...")
+                    (agent-ide-history-fetch command environment directory)))
+         (candidates (agent-ide-history-candidates entries)))
     (unless candidates
-      (user-error "No saved sessions%s"
+      (user-error "No backend sessions%s"
                   (if directory " in this project; use C-u M-x agent-ide-resume for all projects" "")))
-    (agent-ide--resume-entry
-     (cdr (assoc (completing-read "Resume session: " candidates nil t) candidates)))))
+    (let ((entry (cdr (assoc (completing-read "Resume session: " candidates nil t) candidates))))
+      (unless entry (user-error "No session selected"))
+      (agent-ide--resume-entry
+       (append `((command . ,command) (environment . ,environment) (mcpServers . ,mcp-servers))
+               entry)))))
 
 ;;;###autoload
 (defun agent-ide-resume (&optional all-projects)
-  "Resume this disconnected session, otherwise choose a saved session.
+  "Resume this disconnected session, otherwise choose a backend session.
 With a prefix argument, always choose from all projects."
   (interactive "P")
   (let ((session (agent-ide--session-for-buffer)))

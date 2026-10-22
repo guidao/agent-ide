@@ -21,8 +21,7 @@
   (declare (indent 0))
   `(with-temp-buffer
      (agent-ide-session-mode)
-     (let* ((agent-ide-history-file nil)
-            (agent-ide--sessions nil)
+     (let* ((agent-ide--sessions nil)
             (agent-ide--session-metadata (make-hash-table :test 'eq))
             (session (agent-ide--make-session
                       :directory default-directory :buffer (current-buffer)
@@ -178,58 +177,12 @@
           (agent-ide-transcript--handle-permission session request)))
       (should-not (equal (car keys) (cadr keys))))))
 
-(ert-deftest agent-ide-resume-history-persists-and-filters-without-credentials ()
-  (agent-ide-resume-test--with-session
-   (let* ((directory (make-temp-file "agent-ide-history-test-" t))
-          (agent-ide-history-file (expand-file-name "sessions.json" directory)))
-     (unwind-protect
-         (progn
-           (agent-ide--session-metadata-put session :command '("agent" "--token" "secret"))
-           (agent-ide-history-record session)
-           (agent-ide-history-record session "Fix scrolling\nextra content")
-           (agent-ide-history-record session "Do not replace the title")
-           (let ((entries (agent-ide-history-read)))
-             (should (= (length entries) 1))
-             (should (equal (map-elt (car entries) 'title) "Fix scrolling"))
-             (should (= (length (agent-ide-history-candidates default-directory)) 1))
-             (should-not (agent-ide-history-candidates directory)))
-           (with-temp-buffer
-             (insert-file-contents agent-ide-history-file)
-             (should-not (string-match-p "secret\\|extra content" (buffer-string)))))
-       (delete-directory directory t)))))
-
-(ert-deftest agent-ide-resume-history-corruption-is-not-overwritten ()
-  (agent-ide-resume-test--with-session
-   (let ((agent-ide-history-file (make-temp-file "agent-ide-corrupt-" nil nil "broken json")))
-     (unwind-protect
-         (progn
-           (agent-ide--session-metadata-put session :command '("agent"))
-           (agent-ide-history-record session)
-           (should-error (agent-ide-history-read))
-           (with-temp-buffer
-             (insert-file-contents agent-ide-history-file)
-             (should (equal (buffer-string) "broken json"))))
-       (delete-file agent-ide-history-file)))))
-
-(ert-deftest agent-ide-resume-rejects-backend-mismatch-before-spawning ()
-  (let ((agent-ide--sessions nil)
-        (agent-ide-command '("different-agent")))
-    (cl-letf (((symbol-function 'agent-ide--create-session)
-               (lambda (&rest _) (ert-fail "Must not spawn the wrong backend"))))
-      (should-error
-       (agent-ide--resume-entry
-        `((sessionId . "saved") (directory . ,default-directory)
-          (backend . ,(agent-ide-history-backend-key '("original-agent")))
-          (backendName . "original-agent")))
-       :type 'user-error))))
-
 (ert-deftest agent-ide-resume-real-process-roundtrip ()
   "Exercise real JSON-RPC transport, idle exit, reconnection and cold load."
   (skip-unless (and (fboundp 'acp-make-client) (executable-find "python3")))
   (dolist (capability '("both" "resume" "load"))
     (let* ((directory (make-temp-file "agent-ide-acp-test-" t))
            (state-file (expand-file-name "state.json" directory))
-           (agent-ide-history-file (expand-file-name "sessions.json" directory))
            (agent-ide-command (list (executable-find "python3") "-u"
                                     agent-ide-resume-test--fixture state-file capability))
            (agent-ide-environment nil)
@@ -267,10 +220,13 @@
               (agent-ide-deliver-prompt session "second turn")
               (agent-ide-resume-test--wait
                (lambda () (equal (agent-ide-session-status session) "idle")))
-              ;; Closing the transcript keeps its persistent index entry.
+              ;; Rediscover the session from the backend after closing its buffer.
               (kill-buffer (agent-ide-session-buffer session))
               (should-not agent-ide--sessions)
-              (let ((restored (agent-ide--resume-entry (car (agent-ide-history-read)))))
+              (let ((restored
+                     (cl-letf (((symbol-function 'completing-read)
+                                (lambda (_prompt collection &rest _) (caar collection))))
+                       (agent-ide-resume-history nil directory))))
                 (push (agent-ide-session-buffer restored) buffers)
                 (agent-ide-resume-test--wait
                  (lambda () (equal (agent-ide-session-status restored) "idle")))
@@ -281,6 +237,7 @@
                 (agent-ide-deliver-prompt restored "third turn")
                 (agent-ide-resume-test--wait
                  (lambda () (equal (agent-ide-session-status restored) "idle"))))
+              (should-not (file-exists-p (expand-file-name "sessions.json" directory)))
               (with-temp-buffer
                 (insert-file-contents state-file)
                 (let* ((state (json-parse-buffer :object-type 'alist :array-type 'list))

@@ -8,7 +8,6 @@
 (require 'use-package)
 
 (defvar agent-ide-command)
-(defvar agent-ide-history-file)
 (defvar agent-ide--sessions)
 
 (defconst agent-ide-autoload-test--root
@@ -29,7 +28,6 @@
   (let* ((directory (file-name-as-directory (make-temp-file "agent-ide-cold-" t)))
          (default-directory directory)
          (state-file (expand-file-name "state.json" directory))
-         (agent-ide-history-file (expand-file-name "sessions.json" directory))
          (agent-ide-command
           (list (executable-find "python3") "-u"
                 (expand-file-name "test/fixtures/acp-resume-agent.py"
@@ -44,13 +42,6 @@
                      '((created . t) (requests . [])
                        (messages . [["user_message_chunk" "Earlier question"]
                                     ["agent_message_chunk" "Earlier answer"]])))))
-          (with-temp-file agent-ide-history-file
-            (insert (json-serialize
-                     (vector `((sessionId . "fixture-session")
-                               (directory . ,directory)
-                               (backend . ,(secure-hash 'sha256 (prin1-to-string agent-ide-command)))
-                               (backendName . "fixture") (title . "Existing conversation")
-                               (createdAt . 1) (updatedAt . 2))))))
           (with-temp-buffer
             ;; This is an ordinary project buffer, not an Agent IDE buffer.
             (setq default-directory directory)
@@ -77,7 +68,8 @@
             (insert-file-contents state-file)
             (should (equal (map-elt (json-parse-buffer :object-type 'alist :array-type 'list)
                                     'requests)
-                           '("initialize" "session/load")))))
+                           '("initialize" "session/list" "initialize" "session/load"
+                             "initialize" "session/list")))))
       (when session
         (kill-buffer (agent-ide-session-buffer session)))
       (delete-directory directory t))))

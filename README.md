@@ -78,7 +78,7 @@ Type your prompt and press `C-c C-m` (or `Return` with a configured binding) to 
 | `agent-ide-interrupt` | `C-c C-c` / `C-c C-k` | Stop the agent mid-response |
 | `agent-ide-restart` | `C-c C-r` | Kill and restart the current session |
 | `agent-ide-resume` | `C-c C-z` | Reconnect a disconnected session, otherwise choose project history; prefix shows all projects |
-| `agent-ide-resume-history` | — | Always choose from saved sessions, optionally across all projects with a prefix |
+| `agent-ide-resume-history` | — | Choose backend sessions via `session/list`; prefix includes all projects |
 | `agent-ide-set-model` | `C-c C-s` | Switch the agent model (completing-read) |
 | `agent-ide-yank-region` | `C-c C-y` | Insert the active region as file+line context |
 | `agent-ide-sidebar` | `C-c C-b` | Focus the session sidebar |
@@ -120,19 +120,22 @@ inline response overlays. Failed loads keep the previous transcript and offer
 retry, choose-session and new-session buttons. Restoration never automatically
 resends an interrupted prompt or creates a replacement conversation.
 
-The local index defaults to `~/.emacs.d/agent-ide/sessions.json` (relative to
-`user-emacs-directory`). It stores session IDs, directories, backend identities,
-titles and timestamps, and survives closing transcript buffers and Emacs. It
-does not store full conversations or credentials. Set `agent-ide-history-file`
-to another path, or to `nil` to disable persistence; in-memory reconnection
-still works. New sessions are recorded as they are created; older sessions
-without a local index entry are not discovered in this version.
+History is fetched directly from the selected backend using `session/list`,
+including all pages. No local `sessions.json` index is read or written; any old
+index file is unused and can be deleted. Sessions created in other clients are
+available when the backend includes them in its list.
 
-The backend must retain the session and advertise `loadSession` or
-`sessionCapabilities.resume`. To restore a closed buffer, configure the same
-`agent-ide-command` used to create it; a different backend is rejected before
-launch. The current environment and MCP configuration are used after reopening
-Emacs; reconnecting an existing buffer uses its original configuration.
+In an Agent IDE buffer (or from a sidebar entry), history uses that session's
+original command and environment. In a project buffer, it uses the configured
+`agent-ide-command` and `agent-ide-environment`. A prefix lists all projects for
+that backend. Discovery uses a temporary connection without creating a new
+conversation; `C-g` cancels it. Each request times out after
+`agent-ide-history-request-timeout` seconds (default 30).
+
+The backend must advertise `sessionCapabilities.list` for discovery, and
+`loadSession` or `sessionCapabilities.resume` for restoration. Unsupported
+listing reports an error; reconnecting an open buffer by its session ID still
+works. The backend remains responsible for retaining conversations.
 Missing session IDs, removed directories and unsupported capabilities are
 reported without falling back to a new conversation.
 
@@ -224,7 +227,7 @@ A left sidebar lists live sessions. Each entry shows project/`[status]` (or `[as
 | `n` / `p` | Move by entry (two physical lines per entry) |
 | `k` | Kill session (confirm when `agent-ide-sidebar-confirm-kill` is non-nil) |
 | `r` | Restore the session at point |
-| `h` | Choose saved sessions for the entry's project; prefix shows all projects |
+| `h` | Choose backend sessions for the entry's project; prefix shows all projects |
 | `g` | Manual refresh |
 | `q` | Hide sidebar (set user-dismissed; do not kill sessions) |
 
@@ -242,7 +245,7 @@ All options are under the `agent-ide` customize group (`M-x customize-group RET 
 | `agent-ide-text-file-capabilities` | `t` | Advertise ACP file read/write to the agent |
 | `agent-ide-model` | `nil` | Default model ID applied after session creation |
 | `agent-ide-mcp-servers` | `[]` | MCP servers passed to `session/new` |
-| `agent-ide-history-file` | `agent-ide/sessions.json` under `user-emacs-directory` | Local session index; `nil` disables persistence |
+| `agent-ide-history-request-timeout` | `30` | Seconds to wait for each session discovery request |
 | `agent-ide-prompt-placeholder-text` | `"Tell Agent what to do..."` | Empty-prompt placeholder |
 | `agent-ide-running-placeholder-text` | `"Working..."` | Placeholder while the agent processes |
 | `agent-ide-header-icon-animation-interval` | `0.18` | Seconds between rotations of the Agent IDE header icon; `nil` disables animation |
@@ -405,7 +408,7 @@ Emacs and `AGENT_IDE_TEST_GIF` pointing to a local animation; batch tests skip i
 ```
 agent-ide.el              Entry point, defcustom, require all
 ├── agent-ide-core.el     Session struct, helpers, buffer management
-├── agent-ide-history.el  Persistent session index and completion candidates
+├── agent-ide-history.el  ACP session discovery and completion candidates
 ├── agent-ide-renderer.el Transcript rendering, markdown, diff, folds, faces
 ├── agent-ide-stream.el   Batched streaming Markdown and completed-block reuse
 ├── agent-ide-latex.el    Math recognition and asynchronous TeX formula previews

@@ -1,123 +1,119 @@
-;;; agent-ide-history.el --- Persistent session index -*- lexical-binding: t; -*-
+;;; agent-ide-history.el --- Backend session discovery -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Store session identifiers and labels, never backend credentials or transcripts.
+;; Fetch session metadata over ACP; no local session index is read or written.
 
 ;;; Code:
 
+(require 'acp)
+(require 'cl-lib)
+(require 'map)
+(require 'subr-x)
 (require 'agent-ide-core)
 
-(defcustom agent-ide-history-file
-  (expand-file-name "agent-ide/sessions.json" user-emacs-directory)
-  "File containing the local session index, or nil to disable persistence."
-  :type '(choice (const :tag "Disabled" nil) file)
+(defvar agent-ide-client-info)
+
+(defcustom agent-ide-history-request-timeout 30
+  "Maximum seconds to wait for each session discovery request.
+Waiting processes Emacs events and can be cancelled with \\[keyboard-quit]."
+  :type 'number
   :group 'agent-ide)
 
-(defun agent-ide-history-backend-key (command)
-  "Return an identity for backend COMMAND without storing its arguments."
-  (secure-hash 'sha256 (prin1-to-string command)))
+(defun agent-ide-history--request (client request)
+  "Send REQUEST to discovery CLIENT, waiting with a timeout and quit support."
+  (let ((deadline (+ (float-time) agent-ide-history-request-timeout))
+        done response failure)
+    (acp-send-request
+     :client client :request request :buffer (current-buffer)
+     :on-success (lambda (value) (setq response value done t))
+     :on-failure (lambda (value &optional _raw) (setq failure value done 'error)))
+    (while (not done)
+      (unless (process-live-p (map-elt client :process))
+        (user-error "Agent disconnected while requesting %s" (map-elt request :method)))
+      (when (>= (float-time) deadline)
+        (user-error "Timed out requesting %s" (map-elt request :method)))
+      (accept-process-output nil 0.05))
+    (when (eq done 'error)
+      (user-error "%s failed: %s" (map-elt request :method)
+                  (or (map-elt failure 'message) (format "%S" failure))))
+    response))
 
-(defun agent-ide-history--valid-entry-p (entry)
-  "Return non-nil if ENTRY is a usable history record."
-  (and (listp entry)
-       (cl-every (lambda (key) (stringp (map-elt entry key)))
-                 '(sessionId directory backend backendName title))
-       (not (string-empty-p (map-elt entry 'sessionId)))
-       (file-name-absolute-p (map-elt entry 'directory))
-       (numberp (map-elt entry 'createdAt))
-       (numberp (map-elt entry 'updatedAt))))
+(defun agent-ide-history-fetch (command environment &optional directory)
+  "List sessions from COMMAND with ENVIRONMENT, optionally for DIRECTORY.
+Use a temporary connection without creating a conversation.  Fetch every page;
+never persist cursors or session metadata.  Always shut down on error or quit."
+  (unless command (user-error "`agent-ide-command' is empty"))
+  (with-temp-buffer
+    (let ((client (acp-make-client
+                   :context-buffer (current-buffer)
+                   :command (car command) :command-params (cdr command)
+                   :environment-variables environment)))
+      (unwind-protect
+          (let* ((response (agent-ide-history--request
+                            client (acp-make-initialize-request
+                                    :protocol-version 1
+                                    :client-info agent-ide-client-info)))
+                 (capabilities (map-elt response 'agentCapabilities))
+                 (seen (make-hash-table :test 'equal))
+                 (ids (make-hash-table :test 'equal))
+                 cursor entries done)
+            ;; An advertised empty JSON object decodes to nil: test presence.
+            (unless (map-contains-key (map-elt capabilities 'sessionCapabilities) 'list)
+              (user-error "This backend does not support session/list"))
+            (while (not done)
+              (let* ((params (append
+                              (when directory
+                                `((cwd . ,(directory-file-name (expand-file-name directory)))))
+                              (when cursor `((cursor . ,cursor)))))
+                     (page (agent-ide-history--request
+                            client `((:method . "session/list")
+                                     (:params . ,(or params (make-hash-table :test 'equal)))))))
+                (unless (map-contains-key page 'sessions)
+                  (user-error "Invalid session/list response: missing sessions"))
+                (mapc
+                 (lambda (entry)
+                   (let ((id (map-elt entry 'sessionId)) (cwd (map-elt entry 'cwd)))
+                     (unless (and (stringp id) (not (string-empty-p id))
+                                  (stringp cwd) (file-name-absolute-p cwd))
+                       (user-error "Invalid session/list entry"))
+                     (unless (gethash id ids)
+                       (puthash id t ids)
+                       (push entry entries))))
+                 (map-elt page 'sessions))
+                (setq cursor (map-elt page 'nextCursor))
+                (if (not cursor)
+                    (setq done t)
+                  (unless (and (stringp cursor) (not (gethash cursor seen)))
+                    (user-error "Invalid or repeated session/list cursor"))
+                  (puthash cursor t seen))))
+            (nreverse entries))
+        (ignore-errors (acp-shutdown :client client))
+        ;; Ensure cleanup even if an older acp.el cannot shut down a partial start.
+        (when (process-live-p (map-elt client :process))
+          (delete-process (map-elt client :process)))))))
 
-(defun agent-ide-history-read ()
-  "Read the history index as data; signal on invalid data to avoid overwriting it."
-  (when (and agent-ide-history-file (file-exists-p agent-ide-history-file))
-    (with-temp-buffer
-      (insert-file-contents agent-ide-history-file)
-      (let ((entries (json-parse-buffer :object-type 'alist :array-type 'array
-                                        :null-object nil :false-object nil)))
-        (unless (and (vectorp entries)
-                     (cl-every #'agent-ide-history--valid-entry-p entries))
-          (error "Invalid Agent IDE session index: %s" agent-ide-history-file))
-        (append entries nil)))))
-
-(defun agent-ide-history--same-p (a b)
-  "Return non-nil if A and B identify the same backend session and directory."
-  (cl-every (lambda (key) (equal (map-elt a key) (map-elt b key)))
-            '(sessionId directory backend)))
-
-(defun agent-ide-history-record (session &optional prompt)
-  "Persist SESSION metadata, using the first PROMPT as its title.
-Index failures are reported without interrupting the conversation."
-  (when (and agent-ide-history-file
-             (agent-ide-session-acp-session-id session)
-             (agent-ide--session-metadata-get session :command))
-    (condition-case err
-        (let* ((command (agent-ide--session-metadata-get session :command))
-               (entries (agent-ide-history-read))
-               (identity `((sessionId . ,(agent-ide-session-acp-session-id session))
-                           (directory . ,(agent-ide-session-directory session))
-                           (backend . ,(agent-ide-history-backend-key command))))
-               (old (cl-find identity entries :test #'agent-ide-history--same-p))
-               (title (or (agent-ide--session-metadata-get session :title)
-                          (and old (not (equal (map-elt old 'title) "Untitled"))
-                               (map-elt old 'title))
-                          (and prompt
-                               (truncate-string-to-width
-                                (car (split-string (string-trim prompt) "\n"))
-                                80 nil nil "…"))
-                          "Untitled"))
-               (now (float-time))
-               (entry (append identity
-                              `((backendName . ,(file-name-nondirectory (car command)))
-                                (title . ,title)
-                                (createdAt . ,(or (map-elt old 'createdAt) now))
-                                (updatedAt . ,now))))
-               (file (expand-file-name agent-ide-history-file))
-               (directory (file-name-directory file))
-               temporary)
-          (unless (equal title "Untitled")
-            (agent-ide--session-metadata-put session :title title))
-          (make-directory directory t)
-          (unwind-protect
-              (progn
-                (setq temporary (make-temp-file (expand-file-name ".sessions-" directory)))
-                (set-file-modes temporary #o600)
-                (let ((coding-system-for-write 'utf-8-unix)
-                      (write-region-annotate-functions nil)
-                      (write-region-post-annotation-function nil))
-                  (write-region
-                   (json-serialize
-                    (vconcat (cons entry
-                                   (cl-remove identity entries
-                                              :test #'agent-ide-history--same-p))))
-                   nil temporary nil 'silent))
-                (rename-file temporary file t))
-            (when (and temporary (file-exists-p temporary))
-              (delete-file temporary))))
-      (error (message "Agent IDE could not save session index: %s"
-                      (error-message-string err))))))
-
-(defun agent-ide-history-candidates (&optional directory)
-  "Return completion entries, newest first, optionally restricted to DIRECTORY."
-  (let* ((entries (agent-ide-history-read))
-         (filtered
-          (if directory
-              (cl-remove-if-not
-               (lambda (entry)
-                 (equal (file-truename directory)
-                        (file-truename (map-elt entry 'directory))))
-               entries)
-            entries)))
+(defun agent-ide-history-candidates (entries)
+  "Return completion candidates for backend ENTRIES, newest first."
+  (let ((dated (mapcar
+                (lambda (entry)
+                  (cons (or (ignore-errors
+                              (float-time (date-to-time (map-elt entry 'updatedAt))))
+                            0)
+                        entry))
+                entries)))
     (mapcar
-     (lambda (entry)
-       (cons (format "%s  | %s | %s | %s | %s"
-                     (map-elt entry 'title)
-                     (map-elt entry 'backendName)
-                     (abbreviate-file-name (map-elt entry 'directory))
-                     (format-time-string "%m-%d %H:%M" (map-elt entry 'updatedAt))
-                     (map-elt entry 'sessionId))
-             entry))
-     (sort filtered (lambda (a b) (> (map-elt a 'updatedAt)
-                                     (map-elt b 'updatedAt)))))))
+     (lambda (item)
+       (let* ((entry (cdr item))
+              (title (map-elt entry 'title)))
+         (cons (format "%s | %s | %s | %s"
+                       (if (and (stringp title) (not (string-empty-p title)))
+                           (replace-regexp-in-string "[\n\r\t]+" " " title) "Untitled")
+                       (abbreviate-file-name (map-elt entry 'cwd))
+                       (if (zerop (car item)) "—"
+                         (format-time-string "%m-%d %H:%M" (seconds-to-time (car item))))
+                       (map-elt entry 'sessionId))
+               entry)))
+     (cl-stable-sort dated #'> :key #'car))))
 
 (provide 'agent-ide-history)
 ;;; agent-ide-history.el ends here

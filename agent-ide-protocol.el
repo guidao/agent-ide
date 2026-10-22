@@ -12,7 +12,6 @@
 (require 'seq)
 (require 'subr-x)
 (require 'agent-ide-core)
-(require 'agent-ide-history)
 (require 'agent-ide-renderer)
 
 (declare-function agent-ide--watch-client "agent-ide-session" (session))
@@ -163,7 +162,6 @@ When SILENT is non-nil, suppress status messages."
                  (setf (agent-ide-session-models session)
                        (map-elt response 'models))
                  (agent-ide--set-status session "idle")
-                 (agent-ide-history-record session)
                  (agent-ide-renderer-update-header session)
                  (agent-ide-renderer-append-status session "Ready.")
                  (agent-ide-renderer-create-prompt session)
@@ -226,8 +224,7 @@ When SILENT is non-nil, suppress status messages."
                       "Session restored. Earlier messages are not loaded; you can continue chatting."
                     "Session restored."))
          (unless (agent-ide-renderer-input-active-p session)
-           (agent-ide-renderer-create-prompt session))
-         (agent-ide-history-record session))
+           (agent-ide-renderer-create-prompt session)))
        :on-failure (lambda (error) (agent-ide--restore-failed session error))))))
 
 (defun agent-ide-protocol--prompt-content (prompt)
@@ -238,7 +235,6 @@ When SILENT is non-nil, suppress status messages."
 (defun agent-ide-protocol-send-prompt (session prompt)
   "Send PROMPT to SESSION."
   (agent-ide--assert-ready session)
-  (agent-ide-history-record session prompt)
   (agent-ide--session-metadata-put session :has-transcript t)
   (agent-ide--set-status session "running")
   (agent-ide-renderer-update-header session)
@@ -254,7 +250,6 @@ When SILENT is non-nil, suppress status messages."
                  (agent-ide-renderer-finish-stream session)
                  (agent-ide-renderer-reset-stream session)
                  (agent-ide--set-status session "idle")
-                 (agent-ide-history-record session)
                  (agent-ide-renderer-update-header session)
                  (agent-ide-renderer-follow-input session)
                  (when-let* ((stop-reason (map-elt response 'stopReason)))

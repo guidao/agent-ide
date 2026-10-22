@@ -485,7 +485,7 @@ opening another split."
   (interactive "P")
   (let ((session (agent-ide-sidebar--session-at-point)))
     (agent-ide-resume-history
-     all-projects (when session (agent-ide-session-directory session)))))
+     all-projects (when session (agent-ide-session-directory session)) session)))
 
 (defun agent-ide-sidebar-kill ()
   "Kill the session at point."
