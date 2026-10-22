@@ -12,6 +12,9 @@
 (require 'agent-ide-renderer)
 (require 'agent-ide-session)
 
+(defvar agent-ide-sidebar--refresh-timer nil)
+(defvar agent-ide-sidebar--dirty nil)
+
 (defgroup agent-ide-sidebar nil
   "Agent IDE session sidebar."
   :group 'agent-ide
@@ -175,7 +178,7 @@ DOT is the visibility marker (●/○).  Ellipsis is \"..\"."
        (when (and (plist-get record :permission)
                   (plist-get record :pending))
          (setq found t)))
-     (agent-ide-session-tool-calls session))
+     (agent-ide-renderer-active-tools session))
     found))
 
 (defun agent-ide-sidebar--active-tool-title (session)
@@ -196,7 +199,7 @@ DOT is the visibility marker (●/○).  Ellipsis is \"..\"."
                        (and pos (> pos best-pos)))
                (setq active title
                      best-pos (or pos best-pos)))))))
-     (agent-ide-session-tool-calls session))
+     (agent-ide-renderer-active-tools session))
     active))
 
 (defun agent-ide-sidebar--shorten (text max-width)
@@ -262,7 +265,7 @@ Long project names are truncated with \"..\" so status stays visible."
                   (plist-get record :permission)
                   (plist-get record :pending))
          (setq title (or (plist-get record :title) "approval"))))
-     (agent-ide-session-tool-calls session))
+     (agent-ide-renderer-active-tools session))
     title))
 
 (defun agent-ide-sidebar--format-line3 (session)
@@ -287,6 +290,8 @@ Long project names are truncated with \"..\" so status stays visible."
 
 (defun agent-ide-sidebar-refresh ()
   "Redraw the sidebar from live sessions."
+  (agent-ide-sidebar--cancel-refresh)
+  (setq agent-ide-sidebar--dirty nil)
   (agent-ide--cleanup-dead-sessions)
   (let* ((buffer (agent-ide-sidebar--buffer))
          (sessions (reverse agent-ide--sessions))
@@ -337,6 +342,7 @@ Long project names are truncated with \"..\" so status stays visible."
 
 (defun agent-ide-sidebar--hide ()
   "Hide sidebar window if present."
+  (agent-ide-sidebar--cancel-refresh)
   (when-let* ((window (get-buffer-window agent-ide-sidebar-buffer-name t)))
     (quit-window nil window)))
 
@@ -351,21 +357,39 @@ Long project names are truncated with \"..\" so status stays visible."
     (setq agent-ide-sidebar--user-dismissed nil)
     (agent-ide-sidebar--show nil))))
 
+(defun agent-ide-sidebar--cancel-refresh ()
+  "Cancel a pending sidebar redraw."
+  (when (timerp agent-ide-sidebar--refresh-timer)
+    (cancel-timer agent-ide-sidebar--refresh-timer))
+  (setq agent-ide-sidebar--refresh-timer nil))
+
+(defun agent-ide-sidebar--flush-refresh ()
+  "Redraw a dirty sidebar only while it is visible."
+  (agent-ide-sidebar--cancel-refresh)
+  (when (and agent-ide-sidebar--dirty (agent-ide-sidebar--visible-p))
+    (agent-ide-sidebar-refresh)))
+
+(defun agent-ide-sidebar--schedule-refresh ()
+  "Coalesce visible sidebar updates, including redisplay after buffer switches."
+  (when (and agent-ide-sidebar--dirty (agent-ide-sidebar--visible-p)
+             (not (timerp agent-ide-sidebar--refresh-timer)))
+    (setq agent-ide-sidebar--refresh-timer
+          (run-at-time 0.05 nil #'agent-ide-sidebar--flush-refresh))))
+
+(add-hook 'window-configuration-change-hook #'agent-ide-sidebar--schedule-refresh)
+
 (defun agent-ide-sidebar-on-sessions-changed ()
   "Refresh or hide sidebar after session list/status changes."
   (agent-ide--cleanup-dead-sessions)
+  (setq agent-ide-sidebar--dirty t)
   (cond
    ((null agent-ide--sessions)
     (agent-ide-sidebar--hide))
    ((agent-ide-sidebar--visible-p)
-    (agent-ide-sidebar-refresh))
+    (agent-ide-sidebar--schedule-refresh))
    ((and agent-ide-sidebar-auto-show
          (not agent-ide-sidebar--user-dismissed))
-    (agent-ide-sidebar--show nil))
-   (t
-    ;; Dismissed or auto-show off: refresh buffer contents only if it exists.
-    (when (get-buffer agent-ide-sidebar-buffer-name)
-      (agent-ide-sidebar-refresh)))))
+    (agent-ide-sidebar--show nil))))
 
 ;;;###autoload
 (defun agent-ide-sidebar ()

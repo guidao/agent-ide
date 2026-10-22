@@ -84,7 +84,7 @@ Allowed values are nil, `vertical', and `horizontal'.")
        (setq record (plist-put record :respond-fn nil)))
      (when (member (plist-get record :status) '("pending" "in_progress" "in-progress" "running"))
        (setq record (plist-put record :status "disconnected")))
-     (puthash key record (agent-ide-session-tool-calls session)))
+     (agent-ide-renderer--put-tool-record session key record))
    (agent-ide-session-tool-calls session))
   (agent-ide-renderer-reset-stream session))
 

@@ -54,11 +54,22 @@ They run in the buffer containing the formula source.")
   "Last input snapshot as (START TEXT PREVIEW-ENABLED MODIFICATION-TICK).")
 (defvar-local agent-ide-latex--input-fragments nil
   "Input fragments tracked as (BEGIN-MARKER END-MARKER SOURCE).")
+(defvar-local agent-ide-latex--input-stamp nil
+  "Cheap input snapshot: numeric bounds, preview option and character tick.")
 
 (defun agent-ide-latex-update-input (start end)
   "Preview editable input between START and END, preserving its text and faces.
 Call after editing commands.  Retain unchanged fragments and pending workers;
 discard stale previews, including properties inherited by newly inserted text."
+  (let ((stamp (list (+ start 0) (+ end 0) agent-ide-latex-preview
+                     (buffer-chars-modified-tick))))
+    (unless (equal stamp agent-ide-latex--input-stamp)
+      (agent-ide-latex--update-input-changed start end)
+      (setq agent-ide-latex--input-stamp stamp)))
+  (agent-ide-latex--reveal-at-point))
+
+(defun agent-ide-latex--update-input-changed (start end)
+  "Reconcile previews after input START..END changes."
   (let* ((source (buffer-substring-no-properties start end))
          (state (list start source agent-ide-latex-preview
                       (buffer-chars-modified-tick))))
@@ -110,8 +121,7 @@ discard stale previews, including properties inherited by newly inserted text."
                               (copy-marker (cadr fragment) nil) (caddr fragment)))
                       fragments)
               agent-ide-latex--input-state state)
-        (agent-ide-latex-render fragments)))
-    (agent-ide-latex--reveal-at-point)))
+        (agent-ide-latex-render fragments)))))
 
 (defun agent-ide-latex--restore-preview ()
   "Restore the revealed formula if its source and preview are still valid."

@@ -96,7 +96,7 @@
           (agent-ide-stream-queue state (point-max)))
         (should (= calls 1))
         (agent-ide-stream-flush state t)
-        (should (= calls 2))))))
+        (should (= calls 1))))))
 
 (ert-deftest agent-ide-stream-finalizes-split-markdown-and-math ()
   (dolist (chunks '(("intro\n\n**bo" "ld** and [link](" "target.el)\n\nend")

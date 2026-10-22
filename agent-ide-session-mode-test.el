@@ -178,25 +178,27 @@
                  (agent-ide-renderer--header-line-content session)))))))
 
 (ert-deftest agent-ide-renderer-header-icon-advances-for-live-sessions ()
-  "The shared animation advances and refreshes live session headers."
-  (with-temp-buffer
-    (agent-ide-session-mode)
-    (let* ((session (agent-ide-session-mode-test--session))
-           (agent-ide--sessions (list session))
-           (agent-ide-renderer--header-icon-frame 0)
-           (agent-ide-renderer--header-icon-timer nil))
-      (setq-local agent-ide--session session)
-      (cl-letf (((symbol-function 'agent-ide-renderer--header-icon-string)
-                 (lambda ()
-                   (format "FRAME-%d"
-                           agent-ide-renderer--header-icon-frame)))
-                ((symbol-function 'agent-ide-renderer--header-summary)
-                 (lambda (_session) "Model")))
-        (agent-ide-renderer--advance-header-icon)
-        (should (= agent-ide-renderer--header-icon-frame 1))
-        (should (string-match-p
-                 "FRAME-1 Model"
-                 (substring-no-properties header-line-format)))))))
+  "The shared animation advances and refreshes visible session headers."
+  (save-window-excursion
+    (with-temp-buffer
+      (set-window-buffer (selected-window) (current-buffer))
+      (agent-ide-session-mode)
+      (let* ((session (agent-ide-session-mode-test--session))
+             (agent-ide--sessions (list session))
+             (agent-ide-renderer--header-icon-frame 0)
+             (agent-ide-renderer--header-icon-timer nil))
+	(setq-local agent-ide--session session)
+	(cl-letf (((symbol-function 'agent-ide-renderer--header-icon-string)
+                   (lambda ()
+                     (format "FRAME-%d"
+                             agent-ide-renderer--header-icon-frame)))
+                  ((symbol-function 'agent-ide-renderer--header-summary)
+                   (lambda (_session) "Model")))
+          (agent-ide-renderer--advance-header-icon)
+          (should (= agent-ide-renderer--header-icon-frame 1))
+          (should (string-match-p
+                   "FRAME-1 Model"
+                   (substring-no-properties header-line-format))))))))
 
 (ert-deftest agent-ide-renderer-thought-uses-codex-heading ()
   "Thought blocks use Codex-style headings instead of disclosure prefixes."

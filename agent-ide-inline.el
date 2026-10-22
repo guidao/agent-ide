@@ -398,6 +398,37 @@ the reference context (region, line, defun, window, buffer)."
 
 ;;; Response overlay viewport
 
+(defvar-local agent-ide-inline--line-cache nil
+  "Response line count as (CHARACTER-TICK . COUNT).")
+(defvar-local agent-ide-inline--view-cache nil
+  "Viewport position as (CHARACTER-TICK INDEX MARKER).")
+
+(defun agent-ide-inline--line-count ()
+  "Return the response line count, scanning only after untracked edits."
+  (let ((tick (buffer-chars-modified-tick)))
+    (unless (eql tick (car agent-ide-inline--line-cache))
+      (setq agent-ide-inline--line-cache
+            (cons tick (line-number-at-pos (point-max)))))
+    (cdr agent-ide-inline--line-cache)))
+
+(defun agent-ide-inline--view-start (index)
+  "Return the beginning of response line INDEX, moving from the last viewport."
+  (let ((tick (buffer-chars-modified-tick)))
+    (if (and (eql tick (car agent-ide-inline--view-cache))
+             (marker-buffer (nth 2 agent-ide-inline--view-cache)))
+        (progn
+          (goto-char (nth 2 agent-ide-inline--view-cache))
+          (forward-line (- index (nth 1 agent-ide-inline--view-cache))))
+      (when agent-ide-inline--view-cache
+        (set-marker (nth 2 agent-ide-inline--view-cache) nil))
+      (goto-char (point-min))
+      (forward-line index)
+      (setq agent-ide-inline--view-cache (list tick index (point-marker))))
+    (setcar agent-ide-inline--view-cache tick)
+    (setcar (cdr agent-ide-inline--view-cache) index)
+    (set-marker (nth 2 agent-ide-inline--view-cache) (point))
+    (point)))
+
 (defun agent-ide-inline--response-overlay-height (ov)
   "Return the response viewport height for OV."
   (or (overlay-get ov 'agent-ide-inline-height)
@@ -453,7 +484,15 @@ the reference context (region, line, defun, window, buffer)."
       (when (buffer-live-p src)
         (with-current-buffer src
           (goto-char (point-max))
-          (insert chunk)
+          (let ((tick (buffer-chars-modified-tick)))
+            (insert chunk)
+            (when (eql tick (car agent-ide-inline--line-cache))
+              (setq agent-ide-inline--line-cache
+                    (cons (buffer-chars-modified-tick)
+                          (+ (cdr agent-ide-inline--line-cache)
+                             (cl-count ?\n chunk)))))
+            (when (eql tick (car agent-ide-inline--view-cache))
+              (setcar agent-ide-inline--view-cache (buffer-chars-modified-tick))))
           (agent-ide-stream-queue
            (agent-ide-inline--stream-state ov) (point-max)))))))
 
@@ -463,18 +502,19 @@ the reference context (region, line, defun, window, buffer)."
     (let* ((plist (overlay-get ov 'agent-ide-inline))
            (src (plist-get plist :src))
            (height (agent-ide-inline--response-overlay-height ov))
-           (index (or (overlay-get ov 'agent-ide-inline-scroll-index) 0))
            (len (if (buffer-live-p src)
                     (with-current-buffer src
-                      (line-number-at-pos (point-max)))
+                      (agent-ide-inline--line-count))
                   0))
+           (index (min (or (overlay-get ov 'agent-ide-inline-scroll-index) 0)
+                       (max 0 (- len height))))
            (view-string
             (and (buffer-live-p src)
                  (with-current-buffer src
-                   (goto-char (point-min))
+                   (agent-ide-inline--view-start index)
                    (buffer-substring
-                    (pos-bol (1+ index))
-                    (pos-eol (+ index height))))))
+                    (point)
+                    (pos-eol height)))))
            (up (if (> index 0) "⬆ " "  "))
            (down (if (< (+ index height) len) "⬇ " "  "))
            (header (format "%s%s %s"
@@ -503,7 +543,7 @@ the reference context (region, line, defun, window, buffer)."
          (src (plist-get plist :src))
          (len (if (buffer-live-p src)
                   (with-current-buffer src
-                    (line-number-at-pos (point-max)))
+                    (agent-ide-inline--line-count))
                 0))
          (max-index (max 0 (- len height))))
     (overlay-put ov 'agent-ide-inline-scroll-index

@@ -419,7 +419,20 @@ Called with (SESSION TEXT) after the chunk is rendered in the transcript.")
          (mapcar #'agent-ide-transcript--diff-text diffs))
    "\n\n"))
 
+(defvar agent-ide-transcript--diff-cache nil
+  "Dynamically scoped cache shared by one tool display calculation.")
+
 (defun agent-ide-transcript--diff-text (diff)
+  "Extract DIFF once per tool update, including empty results."
+  (if (not agent-ide-transcript--diff-cache)
+      (agent-ide-transcript--compute-diff-text diff)
+    (let ((cached (gethash diff agent-ide-transcript--diff-cache 'missing)))
+      (if (eq cached 'missing)
+          (puthash diff (agent-ide-transcript--compute-diff-text diff)
+                   agent-ide-transcript--diff-cache)
+        cached))))
+
+(defun agent-ide-transcript--compute-diff-text (diff)
   "Extract normalized diff text from DIFF."
   (let ((item-diff (or (map-elt diff 'diff)
                        (map-elt diff 'patch)
@@ -538,15 +551,15 @@ When CONTROLS is non-nil, append inline diff action buttons."
   "Return plist display data for TOOL-CALL in a Codex-like style.
 When UPDATE-ONLY is non-nil, omit fallback titles so the renderer keeps the
 existing tool heading."
-  (let* ((raw (map-elt tool-call 'rawInput))
+  (let* ((agent-ide-transcript--diff-cache (make-hash-table :test 'eq))
+         (raw (map-elt tool-call 'rawInput))
          (content (map-elt tool-call 'content))
          (items (agent-ide-transcript--content-list content))
          (diffs (agent-ide-transcript--top-level-diffs items))
          (command (agent-ide-transcript--raw-command-string raw))
          (tool-id (agent-ide-transcript--tool-id tool-call))
          (title (agent-ide-transcript--tool-title tool-call))
-         (summary (agent-ide-transcript--tool-summary-text tool-call))
-         (detail (agent-ide-transcript--tool-detail-text tool-call)))
+         (summary (agent-ide-transcript--tool-summary-text tool-call)))
     (cond
      (diffs
       (list :title (format "Prepared %d file %s"
@@ -569,14 +582,15 @@ existing tool heading."
                      "\n")
               :expanded-output output)))
      (t
-      (list :title (and (not update-only)
-                        (not (agent-ide-transcript--tool-title-id-p
-                              title
-                              tool-id))
-                        (or title summary "Tool call"))
-            :body (when (or summary (and detail (not update-only)))
-                    (agent-ide-transcript--tool-summary-body summary detail))
-            :expanded-output detail)))))
+      (let ((detail (agent-ide-transcript--tool-detail-text tool-call)))
+        (list :title (and (not update-only)
+                          (not (agent-ide-transcript--tool-title-id-p
+				title
+				tool-id))
+                          (or title summary "Tool call"))
+              :body (when (or summary (and detail (not update-only)))
+                      (agent-ide-transcript--tool-summary-body summary detail))
+              :expanded-output detail))))))
 
 (defun agent-ide-transcript--tool-title-id-p (title tool-id)
   "Return non-nil when TITLE is just a generated TOOL-ID."

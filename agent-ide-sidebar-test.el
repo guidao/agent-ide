@@ -38,6 +38,7 @@ PLIST may include :models :usage :buffer-name."
 
 (defun agent-ide-sidebar-test--teardown ()
   "Kill sidebar and test session buffers; clear global session list."
+  (agent-ide-sidebar--cancel-refresh)
   (setq agent-ide--sessions nil)
   (setq agent-ide-sidebar--user-dismissed nil)
   (when-let* ((buf (get-buffer agent-ide-sidebar-buffer-name)))
@@ -244,12 +245,13 @@ PLIST may include :models :usage :buffer-name."
     (agent-ide-sidebar-test--teardown)))
 
 (ert-deftest agent-ide-sidebar-status-change-updates-text ()
-  "agent-ide--set-status refreshes sidebar text."
+  "agent-ide--set-status schedules a visible sidebar refresh."
   (unwind-protect
       (let ((session (agent-ide-sidebar-test--make-session "/tmp/a" "idle")))
         (setq agent-ide--sessions (list session))
-        (agent-ide-sidebar-refresh)
+        (agent-ide-sidebar--show)
         (agent-ide--set-status session "running")
+        (agent-ide-sidebar--flush-refresh)
         (with-current-buffer agent-ide-sidebar-buffer-name
           (should (string-match-p
                    "running"

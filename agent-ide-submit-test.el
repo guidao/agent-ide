@@ -80,4 +80,59 @@
                        "final english"))
         (should (string-match-p "final english" (buffer-string)))))))
 
+(ert-deftest agent-ide-cancel-rejects-idle-and-non-prompt-requests ()
+  (with-temp-buffer
+    (let ((session (agent-ide-submit-test--session)))
+      (cl-letf (((symbol-function 'acp-send-notification)
+                 (lambda (&rest _) (ert-fail "Sent cancel without an active prompt"))))
+        (dolist (status '("idle" "initializing" "creating-session" "resuming"
+                          "disconnected" "failed" "running"))
+          (setf (agent-ide-session-status session) status
+                (agent-ide-session-active-requests session)
+                '(((:method . "session/set_model"))))
+          (should-error (agent-ide-protocol-cancel session) :type 'user-error)
+          (should (equal status (agent-ide-session-status session))))))))
+
+(ert-deftest agent-ide-cancel-pending-prompt-is-idempotent ()
+  (with-temp-buffer
+    (let ((session (agent-ide-submit-test--session)) (sent 0))
+      (setf (agent-ide-session-status session) "running"
+            (agent-ide-session-active-requests session) '(((:method . "session/prompt"))))
+      (cl-letf (((symbol-function 'acp-send-notification)
+                 (lambda (&rest _)
+                   (should (equal "interrupting" (agent-ide-session-status session)))
+                   (cl-incf sent))))
+        (agent-ide-protocol-cancel session)
+        (agent-ide-protocol-cancel session)
+        (should (= sent 1))
+        (should (equal "interrupting" (agent-ide-session-status session)))
+        (should (agent-ide-session-active-requests session))))))
+
+(ert-deftest agent-ide-cancel-preserves-completion-during-send ()
+  (with-temp-buffer
+    (let ((session (agent-ide-submit-test--session)))
+      (setf (agent-ide-session-status session) "running"
+            (agent-ide-session-active-requests session) '(((:method . "session/prompt"))))
+      (cl-letf (((symbol-function 'acp-send-notification)
+                 (lambda (&rest _)
+                   (setf (agent-ide-session-active-requests session) nil)
+                   (agent-ide--set-status session "idle"))))
+        (agent-ide-protocol-cancel session)
+        (should (equal "idle" (agent-ide-session-status session)))
+        (agent-ide--assert-ready session)))))
+
+(ert-deftest agent-ide-cancel-send-failure-does-not-stick-interrupting ()
+  (dolist (disconnect '(nil t))
+    (with-temp-buffer
+      (let ((session (agent-ide-submit-test--session)))
+        (setf (agent-ide-session-status session) "running"
+              (agent-ide-session-active-requests session) '(((:method . "session/prompt"))))
+        (cl-letf (((symbol-function 'acp-send-notification)
+                   (lambda (&rest _)
+                     (when disconnect (agent-ide--set-status session "disconnected"))
+                     (error "Send failed"))))
+          (should-error (agent-ide-protocol-cancel session))
+          (should (equal (if disconnect "disconnected" "running")
+                         (agent-ide-session-status session))))))))
+
 (provide 'agent-ide-submit-test)

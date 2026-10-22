@@ -9,6 +9,7 @@
 (require 'acp)
 (require 'cl-lib)
 (require 'map)
+(require 'seq)
 (require 'subr-x)
 (require 'agent-ide-core)
 (require 'agent-ide-history)
@@ -276,20 +277,37 @@ When SILENT is non-nil, suppress status messages."
                                      session error))))
 
 (defun agent-ide-protocol-cancel (session)
-  "Cancel active turn for SESSION."
+  "Cancel SESSION's pending prompt without trapping an idle session.
+Repeated cancellation leaves the original request waiting for its response."
   (unless (agent-ide-session-acp-session-id session)
     (user-error "No active agent ACP session"))
-  (when (member (agent-ide-session-status session)
-                '("disconnected" "resuming" "initializing" "failed"))
+  (cond
+   ((equal (agent-ide-session-status session) "interrupting")
+    (message "Interrupt already requested; waiting for the active turn"))
+   ((not (and (equal (agent-ide-session-status session) "running")
+              (seq-some (lambda (request)
+                          (equal (map-elt request :method) "session/prompt"))
+                        (agent-ide-session-active-requests session))))
     (user-error "No active turn to cancel"))
-  (acp-send-notification
-   :client (agent-ide-session-client session)
-   :notification (acp-make-session-cancel-notification
-                  :session-id (agent-ide-session-acp-session-id session)
-                  :reason "User cancelled"))
-  (agent-ide--set-status session "interrupting")
-  (agent-ide-renderer-update-header session)
-  (agent-ide-renderer-append-status session "Interrupt requested."))
+   (t
+    (let ((client (agent-ide-session-client session)))
+      ;; Set this before sending: a prompt response dispatched while sending
+      ;; must be allowed to leave the session idle, rather than overwritten.
+      (agent-ide--set-status session "interrupting")
+      (condition-case err
+          (acp-send-notification
+           :client client
+           :notification (acp-make-session-cancel-notification
+                          :session-id (agent-ide-session-acp-session-id session)
+                          :reason "User cancelled"))
+        (error
+         (when (and (eq client (agent-ide-session-client session))
+                    (equal (agent-ide-session-status session) "interrupting"))
+           (agent-ide--set-status session "running")
+           (agent-ide-renderer-update-header session))
+         (signal (car err) (cdr err)))))
+    (agent-ide-renderer-update-header session)
+    (agent-ide-renderer-append-status session "Interrupt requested."))))
 
 (defun agent-ide-protocol-respond-permission (session request-id option-id)
   "Respond to SESSION permission REQUEST-ID with OPTION-ID.

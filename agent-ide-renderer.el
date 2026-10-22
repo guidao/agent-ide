@@ -436,14 +436,16 @@ can keep using the current tail position."
   "Return non-nil when WINDOW is already following transcript ANCHOR-POS."
   (let ((buffer-end (point-max))
         (window-point-pos (window-point window))
-        (window-start-pos (window-start window))
-        (window-end-pos (window-end window t)))
+        (window-start-pos (window-start window)))
     (and (window-live-p window)
          (eq (window-buffer window) (current-buffer))
          (or (>= window-point-pos anchor-pos)
-             (>= window-end-pos anchor-pos)
-             (and (>= window-end-pos buffer-end)
-                  (> window-point-pos window-start-pos))))))
+             ;; Computing a stale window end can lay out the whole viewport.
+             ;; A cursor already at the tail needs no layout query at all.
+             (let ((window-end-pos (window-end window t)))
+               (or (>= window-end-pos anchor-pos)
+                   (and (>= window-end-pos buffer-end)
+                        (> window-point-pos window-start-pos))))))))
 
 (defun agent-ide-renderer--capture-transcript-window-positions (session anchor-pos)
   "Capture current-buffer window positions relative to transcript ANCHOR-POS."
@@ -516,8 +518,8 @@ Preserve the active input edit point and transcript window positions."
         (agent-ide-renderer--writable
           (goto-char pos)
           (funcall thunk))
-        (agent-ide-renderer--restore-input-point-marker restore-point)
-        (agent-ide-renderer--sync-following-window-points session)))))
+        ;; The surrounding window restoration already moves following windows.
+        (agent-ide-renderer--restore-input-point-marker restore-point)))))
 
 (defun agent-ide-renderer-follow-input (session)
   "Move following windows for SESSION to the active input prompt."
@@ -608,7 +610,9 @@ Preserve the active input edit point and transcript window positions."
                     (marker-position end-marker))
               ranges)
         (button-put button 'agent-ide-expanded-start nil)
-        (button-put button 'agent-ide-expanded-end nil))
+        (button-put button 'agent-ide-expanded-end nil)
+        (set-marker start-marker nil)
+        (set-marker end-marker nil))
       (setq pos (or (next-single-property-change pos 'button nil end)
                     end))
       (when (< pos end)
@@ -621,6 +625,14 @@ Preserve the active input edit point and transcript window positions."
                         start end)
                        (lambda (a b) (> (car a) (car b)))))
     (delete-region (car range) (cdr range))))
+
+(defun agent-ide-renderer--delete-fold-overlays (start end)
+  "Release fold overlays owned by headings in START..END before replacement."
+  (let ((pos start))
+    (while (< pos end)
+      (when-let* ((overlay (get-text-property pos 'agent-ide-fold-overlay)))
+        (delete-overlay overlay))
+      (setq pos (next-single-property-change pos 'agent-ide-fold-overlay nil end)))))
 
 (defun agent-ide-renderer--diff-line-face (line)
   "Return the face to use for diff LINE."
@@ -738,23 +750,29 @@ highlighting and fixed-pitch text, matching the codex-ide transcript style."
              fence-start code-start
              '(display "" agent-ide-markdown t))
             (when (and mode (fboundp mode) (< code-start code-end))
-              (let ((code (buffer-substring-no-properties code-start code-end))
-                    (target-buffer (current-buffer)))
-                (with-temp-buffer
-                  (insert code)
-                  (funcall mode)
-                  (font-lock-mode 1)
-                  (font-lock-ensure (point-min) (point-max))
-                  (let ((fontified (buffer-string)))
-                    (with-current-buffer target-buffer
-                      (agent-ide-renderer--apply-fontified-text
-                       code-start
-                       code-end
-                       fontified)
-                      (when (memq mode '(emacs-lisp-mode lisp-mode))
-                        (agent-ide-renderer--fontify-elisp-fallback
-                         code-start
-                         code-end)))))))
+              (let* ((code (buffer-substring-no-properties code-start code-end))
+                     (signature (list mode code custom-enabled-themes
+                                      (and (boundp 'face-remapping-alist)
+                                           face-remapping-alist)))
+                     (target-buffer (current-buffer)))
+                (unless (equal signature
+                               (get-text-property fence-start 'agent-ide-code-cache))
+                  (with-temp-buffer
+                    (insert code)
+                    ;; Highlighting a snippet must not start users' mode hooks
+                    ;; (LSP, linters, etc.) in a throwaway buffer.
+                    (delay-mode-hooks (funcall mode))
+                    (font-lock-mode 1)
+                    (font-lock-ensure (point-min) (point-max))
+                    (let ((fontified (buffer-string)))
+                      (with-current-buffer target-buffer
+                        (remove-text-properties code-start code-end '(face nil))
+                        (agent-ide-renderer--apply-fontified-text
+                         code-start code-end fontified)
+                        (when (memq mode '(emacs-lisp-mode lisp-mode))
+                          (agent-ide-renderer--fontify-elisp-fallback code-start code-end)))))
+                  (put-text-property fence-start (1+ fence-start)
+                                     'agent-ide-code-cache signature))))
             (add-text-properties code-start code-end
                                  '(agent-ide-markdown t
                                                        agent-ide-markdown-code-content t))
@@ -1379,13 +1397,18 @@ Use a compact text fallback in terminals and builds without PNG support."
           " "
           (agent-ide-renderer--header-summary session)))
 
-(defun agent-ide-renderer--set-header-line (session)
+(defun agent-ide-renderer--set-header-line (session &optional refresh-summary)
   "Set SESSION's header line using the current icon animation frame."
   (when-let* ((buffer (agent-ide-session-buffer session)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
+        (when (or refresh-summary
+                  (not (agent-ide--session-metadata-get session :header-summary)))
+          (agent-ide--session-metadata-put
+           session :header-summary (agent-ide-renderer--header-summary session)))
         (setq header-line-format
-              (concat " " (agent-ide-renderer--header-line-content session)))
+              (concat " " (agent-ide-renderer--header-icon-string) " "
+                      (agent-ide--session-metadata-get session :header-summary)))
         (force-mode-line-update)))))
 
 (defun agent-ide-renderer--stop-header-icon-animation ()
@@ -1395,12 +1418,13 @@ Use a compact text fallback in terminals and builds without PNG support."
   (setq agent-ide-renderer--header-icon-timer nil))
 
 (defun agent-ide-renderer--advance-header-icon ()
-  "Advance and redraw the Agent IDE icon in every live session header."
+  "Advance the icon in visible session headers, stopping when all are hidden."
   (setq agent-ide-renderer--header-icon-frame
         (mod (1+ agent-ide-renderer--header-icon-frame) 4))
   (let ((has-live-session nil))
     (dolist (session agent-ide--sessions)
-      (when (agent-ide--session-live-p session)
+      (when (and (agent-ide--session-live-p session)
+                 (get-buffer-window (agent-ide-session-buffer session) t))
         (setq has-live-session t)
         (agent-ide-renderer--set-header-line session)))
     (unless has-live-session
@@ -1409,6 +1433,10 @@ Use a compact text fallback in terminals and builds without PNG support."
 (defun agent-ide-renderer--ensure-header-icon-animation ()
   "Start the shared session header icon animation timer when appropriate."
   (if (and (display-images-p)
+           (seq-some (lambda (session)
+                       (and (agent-ide--session-live-p session)
+                            (get-buffer-window (agent-ide-session-buffer session) t)))
+                     agent-ide--sessions)
            (numberp agent-ide-header-icon-animation-interval)
            (> agent-ide-header-icon-animation-interval 0))
       (unless (timerp agent-ide-renderer--header-icon-timer)
@@ -1418,11 +1446,14 @@ Use a compact text fallback in terminals and builds without PNG support."
                            #'agent-ide-renderer--advance-header-icon)))
     (agent-ide-renderer--stop-header-icon-animation)))
 
+(add-hook 'window-configuration-change-hook
+          #'agent-ide-renderer--ensure-header-icon-animation)
+
 (defun agent-ide-renderer-update-header (session)
   "Update SESSION header line."
   (when-let* ((buffer (agent-ide-session-buffer session)))
     (when (buffer-live-p buffer)
-      (agent-ide-renderer--set-header-line session)
+      (agent-ide-renderer--set-header-line session t)
       (with-current-buffer buffer
         (agent-ide-renderer-refresh-placeholder session))
       (agent-ide-renderer--ensure-header-icon-animation)
@@ -1572,7 +1603,14 @@ Use a compact text fallback in terminals and builds without PNG support."
 
 (defun agent-ide-renderer--input-empty-p (session)
   "Return non-nil if SESSION prompt is empty."
-  (string-empty-p (string-trim (agent-ide-renderer-current-input session))))
+  (with-current-buffer (agent-ide-session-buffer session)
+    (let ((start (agent-ide-session-input-start-marker session))
+          (end (agent-ide-session-input-end-marker session)))
+      (or (not (and start end (marker-buffer start) (marker-buffer end)))
+          (save-excursion
+            (goto-char start)
+            (skip-chars-forward " \t\n\r" end)
+            (= (point) end))))))
 
 (defun agent-ide-renderer--placeholder-visible-p (session)
   "Return non-nil when SESSION placeholder should be visible."
@@ -1839,7 +1877,32 @@ When VERBATIM is non-nil, preserve trailing whitespace for draft restoration."
 
 (defun agent-ide-renderer--put-tool-record (session key record)
   "Store SESSION tool RECORD under KEY."
-  (puthash key record (agent-ide-session-tool-calls session)))
+  (puthash key record (agent-ide-session-tool-calls session))
+  (when-let* ((index (agent-ide--session-metadata-get session :active-tools))
+              ((eq (car index) (agent-ide-session-tool-calls session))))
+    (if (agent-ide-renderer--active-tool-p record)
+        (puthash key record (cdr index))
+      (remhash key (cdr index)))))
+
+(defun agent-ide-renderer--active-tool-p (record)
+  "Return non-nil for a pending permission or unfinished tool RECORD."
+  (if (plist-get record :permission)
+      (plist-get record :pending)
+    (member (downcase (or (plist-get record :status) ""))
+            '("pending" "in_progress" "in-progress" "running"))))
+
+(defun agent-ide-renderer-active-tools (session)
+  "Return SESSION's small index of active tools and pending permissions.
+Lazily adopt existing records after hot reload or history replacement."
+  (let* ((records (agent-ide-session-tool-calls session))
+         (index (agent-ide--session-metadata-get session :active-tools)))
+    (unless (eq (car index) records)
+      (setq index (cons records (make-hash-table :test 'equal)))
+      (maphash (lambda (key record)
+                 (when (agent-ide-renderer--active-tool-p record)
+                   (puthash key record (cdr index)))) records)
+      (agent-ide--session-metadata-put session :active-tools index))
+    (cdr index)))
 
 (defun agent-ide-renderer--permission-option-label (option)
   "Return a Codex-style label for permission OPTION."
@@ -1881,7 +1944,7 @@ When VERBATIM is non-nil, preserve trailing whitespace for draft restoration."
                latest-record record
                latest-sequence
                (or (plist-get record :permission-sequence) 0))))
-     (agent-ide-session-tool-calls session))
+     (agent-ide-renderer-active-tools session))
     (when latest-record
       (cons latest-key latest-record))))
 
@@ -1911,89 +1974,86 @@ When OPTION-ID is nil, cancel the request.  Reject repeated responses."
 
 (defun agent-ide-renderer-update-tool
     (session key title body &optional status style expanded-output collapsed)
-  "Insert or replace a tool block in SESSION.
-KEY identifies the block.  TITLE, BODY, and STATUS are display text.
-STYLE controls the presentation.  By default, render a compact event block.
-When STYLE is `foldable', render the older collapsed foldable block.
-When COLLAPSED is non-nil, hide the compact block body by default."
-  (agent-ide-renderer-reset-stream session)
-  (with-current-buffer (agent-ide-session-buffer session)
-    (let* ((insert-pos (agent-ide-renderer--insert-position session))
-           (restore-point (agent-ide-renderer--input-point-marker session))
-           (record (agent-ide-renderer--tool-record session key)))
-      (agent-ide-renderer--maybe-save-transcript-position session insert-pos
-        (agent-ide-renderer--writable
-          (when record
-            (when (not title)
-              (setq title (plist-get record :title)))
-            (when (or (not body)
-                      (and (stringp body)
-                           (string-empty-p (string-trim body))))
-              (setq body (plist-get record :body)))
-            (unless expanded-output
-              (setq expanded-output (plist-get record :expanded-output)))
-            (when (and expanded-output
-                       (stringp body)
-                       (not (string-match-p "\\[expand\\]" body)))
-              (setq body (concat (string-trim-right body) " [expand]")))
-            (unless collapsed
-              (setq collapsed (plist-get record :collapsed)))
-            (unless style
-              (setq style (plist-get record :style))))
-          (unless style
-            (setq style 'tool))
-          (if (and record
-                   (markerp (plist-get record :start))
-                   (markerp (plist-get record :end))
-                   (marker-buffer (plist-get record :start))
-                   (marker-buffer (plist-get record :end)))
-              (progn
-                (goto-char (marker-position (plist-get record :start)))
-                (agent-ide-renderer--delete-expanded-output-in-region
-                 (marker-position (plist-get record :start))
-                 (marker-position (plist-get record :end)))
-                (delete-region (marker-position (plist-get record :start))
-                               (marker-position (plist-get record :end))))
-            (goto-char insert-pos)
-            (setq record (list :start (copy-marker (point) nil)
-                               :end (copy-marker (point) nil))))
-          (let ((start (point)))
-            (if (not (eq style 'foldable))
-                (let ((auto-expand (and expanded-output
-                                        (stringp body)
-                                        (string-match-p "\\[open diff\\]" body))))
+  "Insert or update SESSION tool KEY, preserving unchanged display state.
+TITLE, BODY and STATUS describe the tool.  STYLE defaults to a compact tool
+block; `foldable' includes status in its heading.  EXPANDED-OUTPUT supplies
+button contents and COLLAPSED hides the compact body."
+  (let* ((record (agent-ide-renderer--tool-record session key))
+         (live (and record
+                    (markerp (plist-get record :start))
+                    (markerp (plist-get record :end))
+                    (eq (marker-buffer (plist-get record :start))
+                        (agent-ide-session-buffer session))
+                    (eq (marker-buffer (plist-get record :end))
+                        (agent-ide-session-buffer session)))))
+    (when record
+      (setq title (or title (plist-get record :title))
+            body (if (or (null body) (string-empty-p (string-trim body)))
+                     (plist-get record :body) body)
+            expanded-output (or expanded-output (plist-get record :expanded-output))
+            collapsed (or collapsed (plist-get record :collapsed))
+            style (or style (plist-get record :style)))
+      (when (and expanded-output (stringp body)
+                 (not (string-match-p "\\[expand\\]" body)))
+        (setq body (concat (string-trim-right body) " [expand]"))))
+    (setq style (or style 'tool) body (or body ""))
+    (if (and live (not (plist-get record :permission))
+             (equal title (plist-get record :title))
+             (equal body (plist-get record :body))
+             (equal expanded-output (plist-get record :expanded-output))
+             (eq style (plist-get record :style))
+             (equal collapsed (plist-get record :collapsed))
+             (or (not (eq style 'foldable))
+                 (equal status (plist-get record :status))))
+        ;; Status is metadata in compact blocks: keep buttons, open output,
+        ;; overlays and point intact when only the status has changed.
+        (unless (equal status (plist-get record :status))
+          (agent-ide-renderer--put-tool-record
+           session key (plist-put record :status status))
+          (agent-ide--touch-session session)
+          (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+            (agent-ide-sidebar-on-sessions-changed)))
+      (agent-ide-renderer-reset-stream session)
+      (with-current-buffer (agent-ide-session-buffer session)
+        (let* ((insert-pos (agent-ide-renderer--insert-position session))
+               (restore-point (agent-ide-renderer--input-point-marker session)))
+          (agent-ide-renderer--maybe-save-transcript-position session insert-pos
+            (agent-ide-renderer--writable
+              (if live
+                  (progn
+                    (goto-char (plist-get record :start))
+                    (agent-ide-renderer--delete-fold-overlays
+                     (plist-get record :start) (plist-get record :end))
+                    (agent-ide-renderer--delete-expanded-output-in-region
+                     (plist-get record :start) (plist-get record :end))
+                    (delete-region (plist-get record :start) (plist-get record :end)))
+                (goto-char insert-pos)
+                (setq record (list :start (copy-marker (point))
+                                   :end (copy-marker (point)))))
+              (let ((start (point)))
+                (if (eq style 'foldable)
+                    (agent-ide-renderer--insert-foldable-block
+                     (or title "Tool call") body :status status :collapsed t
+                     :face 'agent-ide-tool-face :key key)
                   (agent-ide-renderer--insert-codex-tool-block
-                   title
-                   body
-                   key
-                   collapsed
-                   expanded-output
-                   auto-expand))
-              (agent-ide-renderer--insert-foldable-block
-               (or title "Tool call")
-               (or body "")
-               :status status
-               :collapsed t
-               :face 'agent-ide-tool-face
-               :key key))
-            (set-marker (plist-get record :start) start)
-            (set-marker (plist-get record :end) (point))
-            (setq record (plist-put record :title title))
-            (setq record (plist-put record :body (or body "")))
-            (setq record (plist-put record :status status))
-            (setq record (plist-put record :style style))
-            (setq record (plist-put record :expanded-output expanded-output))
-            (setq record (plist-put record :collapsed collapsed))
-            (when (plist-get record :permission)
-              (setq record (plist-put record :pending nil))
-              (setq record (plist-put record :options nil))
-              (setq record (plist-put record :respond-fn nil)))
-            (agent-ide-renderer--put-tool-record session key record))))
-        (agent-ide-renderer--restore-input-point-marker restore-point)
-        (agent-ide-renderer--sync-following-window-points session)
-        (agent-ide--touch-session session)
-        (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
-          (agent-ide-sidebar-on-sessions-changed)))))
+                   title body key collapsed expanded-output
+                   (and expanded-output (string-match-p "\\[open diff\\]" body))))
+                (set-marker (plist-get record :start) start)
+                (set-marker (plist-get record :end) (point))
+                (dolist (pair (list (cons :title title) (cons :body body)
+                                   (cons :status status) (cons :style style)
+                                   (cons :expanded-output expanded-output)
+                                   (cons :collapsed collapsed)))
+                  (setq record (plist-put record (car pair) (cdr pair))))
+                (when (plist-get record :permission)
+                  (setq record (plist-put record :pending nil))
+                  (setq record (plist-put record :options nil))
+                  (setq record (plist-put record :respond-fn nil)))
+                (agent-ide-renderer--put-tool-record session key record)))
+            (agent-ide-renderer--restore-input-point-marker restore-point))
+          (agent-ide--touch-session session)
+          (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+            (agent-ide-sidebar-on-sessions-changed)))))))
 
 (defun agent-ide-renderer-insert-permission
     (session key title body options respond-fn)

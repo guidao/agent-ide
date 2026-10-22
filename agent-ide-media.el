@@ -101,10 +101,16 @@ cannot be copied into an after-string.")
   (delete-overlay item)
   (setq agent-ide-media--items (delq item agent-ide-media--items)))
 
-(defun agent-ide-media--prune (&rest _)
-  "Release previews whose source has been changed or removed."
+(defun agent-ide-media--prune (&optional start end _old-length)
+  "Release invalid previews intersecting changed START..END.
+Without bounds, check all previews.  Include collapsed overlays and boundary
+edits so deleting a whole image or replacing its delimiters still disposes it."
   (dolist (item (copy-sequence agent-ide-media--items))
-    (unless (agent-ide-media--intact-p item) (agent-ide-media--dispose item))))
+    (when (or (not (overlay-buffer item))
+              (null start)
+              (and (<= (overlay-start item) end)
+                   (>= (overlay-end item) start)))
+      (unless (agent-ide-media--intact-p item) (agent-ide-media--dispose item)))))
 
 (defun agent-ide-media--cleanup ()
   "Release all media owned by the current buffer."
@@ -312,7 +318,7 @@ Skip escaped markup and code, including incomplete streaming code fences."
   (when (and agent-ide-media-preview (display-images-p))
     (save-excursion
       (save-match-data
-        (agent-ide-media--prune)
+        (agent-ide-media--prune start end)
         (goto-char start)
         (while (re-search-forward "`+\\|~~~+\\|!?\\[\\([^]\n]*\\)\\](" end t)
           (let* ((begin (match-beginning 0)) (token (match-string-no-properties 0))
