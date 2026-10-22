@@ -151,7 +151,7 @@ reported without falling back to a new conversation.
 choices and boolean switches. The full configuration is refreshed after a
 change or `config_option_update`; unsupported option types are ignored.
 `C-c C-s` remains the model shortcut. Session titles from `session_info_update`
-appear in the header and sidebar; buffer names remain stable.
+appear in the sidebar; buffer names remain stable.
 
 Structured questions appear in the transcript with an **Answer question**
 button. `C-c C-e` opens an editable form with **Submit**, **Decline** and
@@ -212,7 +212,7 @@ On the response viewport:
 
 ### Header line
 
-The header shows: an animated Agent IDE icon · **model name** · **project directory** · **context usage** / **last-turn tokens**.  The transparent PNG is cached in four rotated frames for lightweight animation.
+The header shows: an animated Agent IDE icon · **model name** · **project directory** · **context left: N%** when the agent reports its context capacity. Hover over the percentage for remaining and total tokens. Context state is retained independently of end-turn token accounting. The transparent PNG is cached in four rotated frames for lightweight animation.
 
 ### Transcript features
 

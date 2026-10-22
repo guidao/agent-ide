@@ -716,6 +716,7 @@ Called only after a successful load.  Historical messages never run live hooks."
             (agent-ide-session-prompt-history session) nil
             (agent-ide-session-prompt-history-index session) nil
             (agent-ide-session-usage session) nil)
+      (agent-ide--session-metadata-put session :context-usage nil)
       (agent-ide-renderer-initialize-buffer session)
       (agent-ide--session-metadata-put session :replaying t)
       (agent-ide--session-metadata-put session :replay-last-kind nil)
@@ -808,6 +809,7 @@ Called only after a successful load.  Historical messages never run live hooks."
           (setf (agent-ide-session-modes session) update)
           (agent-ide-renderer-update-header session))
          ("usage_update"
+          (agent-ide--session-metadata-put session :context-usage update)
           (setf (agent-ide-session-usage session) update)
           (agent-ide-renderer-update-header session))
          (_

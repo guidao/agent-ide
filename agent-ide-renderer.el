@@ -950,6 +950,22 @@ Lines matching the Codex tool-body pattern `  $ ...' get muted."
                                '(face agent-ide-muted-face
                                  agent-ide-markdown t)))))))
 
+(defvar valign-mode)
+(defvar valign-not-align-after-list)
+
+(defun agent-ide-renderer--align-tables (start end)
+  "Align tables in START..END using a window displaying this buffer.
+Asynchronous output must not inherit another window's pixel measurements
+or the command-based suppression intended for interactive table editing."
+  (when (and (fboundp 'valign-region) (bound-and-true-p valign-mode))
+    (when-let* ((window (get-buffer-window (current-buffer) t))
+               ((display-graphic-p (window-frame window))))
+      (with-selected-window window
+        (let ((valign-not-align-after-list nil)
+              (inhibit-read-only t))
+          (save-excursion
+            (valign-region start end)))))))
+
 (defun agent-ide-renderer-render-markdown-region (start end)
   "Apply lightweight Markdown rendering in START..END.
 Table alignment is handled by `valign-mode'."
@@ -966,12 +982,7 @@ Table alignment is handled by `valign-mode'."
       ;; Explicitly align tables via valign after markdown rendering.
       ;; jit-lock may not fire promptly during streaming, so we force
       ;; alignment here to ensure tables in agent output are lined up.
-      (when (and (fboundp 'valign-region)
-                 (display-graphic-p)
-                 valign-mode)
-        (condition-case nil
-            (valign-region start (marker-position end-marker))
-          (error nil)))
+      (agent-ide-renderer--align-tables start (marker-position end-marker))
       (agent-ide-latex-render formulas)
       (agent-ide-media-render start (marker-position end-marker))
       (set-marker end-marker nil))))
@@ -1313,14 +1324,18 @@ Prefers ACP `usage_update' `size', then legacy context-window fields."
    usage '(size modelContextWindow contextWindow maxContextTokens maxInputTokens)))
 
 (defun agent-ide-renderer--context-label (usage)
-  "Return context usage label for USAGE."
+  "Return remaining context percentage for USAGE, if its size is known."
   (when usage
     (let ((used (agent-ide-renderer--context-used usage))
           (window (agent-ide-renderer--context-window usage)))
-      (when (and used window)
-        (format "Context: %s/%s"
-                (agent-ide-renderer--compact-number used)
-                (agent-ide-renderer--compact-number window))))))
+      (when (and (numberp used) (>= used 0)
+                 (numberp window) (> window 0))
+        (propertize
+         (format "context left: %.0f%%"
+                 (* 100.0 (max 0.0 (- 1.0 (/ (float used) window)))))
+         'help-echo (format "%s / %s tokens remaining"
+                            (agent-ide-renderer--compact-number (max 0 (- window used)))
+                            (agent-ide-renderer--compact-number window)))))))
 
 (defun agent-ide-renderer--last-usage-label (usage)
   "Return last turn token usage label for USAGE."
@@ -1341,22 +1356,15 @@ Prefers ACP `usage_update' `size', then legacy context-window fields."
 (defun agent-ide-renderer--header-summary (session)
   "Return header summary text for SESSION."
   (let* ((model-label (agent-ide-renderer--model-label session))
-         (usage (agent-ide-session-usage session))
+         (usage (or (agent-ide--session-metadata-get session :context-usage)
+                    (agent-ide-session-usage session)))
          (context-str
-          (when usage
-            (let ((used (agent-ide-renderer--context-used usage))
-                  (window (agent-ide-renderer--context-window usage)))
-              (when (and used window)
-                (format "%s/%s tokens"
-                        (agent-ide-renderer--compact-number used)
-                        (agent-ide-renderer--compact-number window))))))
+          (agent-ide-renderer--context-label usage))
          (dir (abbreviate-file-name
                (or (agent-ide-session-directory session)
                    default-directory)))
          (sep (propertize " · " 'face 'agent-ide-header-separator-face))
          (parts nil))
-    (when-let* ((title (agent-ide--session-title session)))
-      (push (truncate-string-to-width title 60 nil nil "…") parts))
     (when model-label
       (push (propertize model-label 'face 'agent-ide-header-model-face) parts))
     (when dir
@@ -1416,8 +1424,12 @@ Use a compact text fallback in terminals and builds without PNG support."
           (agent-ide--session-metadata-put
            session :header-summary (agent-ide-renderer--header-summary session)))
         (setq header-line-format
-              (concat " " (agent-ide-renderer--header-icon-string) " "
-                      (agent-ide--session-metadata-get session :header-summary)))
+              ;; Escape mode-line syntax while retaining faces and tooltips.
+              (replace-regexp-in-string
+               "%" (lambda (match) (concat match match))
+               (concat " " (agent-ide-renderer--header-icon-string) " "
+                       (agent-ide--session-metadata-get session :header-summary))
+               t t))
         (force-mode-line-update)))))
 
 (defun agent-ide-renderer--stop-header-icon-animation ()

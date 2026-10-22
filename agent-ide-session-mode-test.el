@@ -118,7 +118,7 @@
               (modelContextWindow . 200000)))
       (let ((summary (agent-ide-renderer--header-summary session)))
         (should (string-match-p "Large" summary))
-        (should (string-match-p "12\\.3k/200\\.0k tokens" summary))))))
+        (should (string-match-p "context left: 94%" summary))))))
 
 (ert-deftest agent-ide-renderer-header-shows-acp-usage-update ()
   "Header summary understands ACP usage_update used/size fields."
@@ -130,7 +130,7 @@
               (used . 53000)
               (size . 200000)))
       (let ((summary (agent-ide-renderer--header-summary session)))
-        (should (string-match-p "53\\.0k/200\\.0k tokens" summary))))))
+        (should (string-match-p "context left: 74%" summary))))))
 
 (ert-deftest agent-ide-renderer-header-handles-available-models ()
   "Header summary uses currentModelId from agent ACP models responses."
