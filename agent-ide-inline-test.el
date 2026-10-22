@@ -335,6 +335,7 @@ not the buffer the command happens to run in (the prompt window)."
                 session (current-buffer) (point))))
       (agent-ide-inline--on-chunk session "here is **bo")
       (agent-ide-inline--on-chunk session "ld** text")
+      (agent-ide-stream-flush (overlay-get ov 'agent-ide-stream))
       (let* ((plist (overlay-get ov 'agent-ide-inline))
              (src (plist-get plist :src)))
         (with-current-buffer src
@@ -356,6 +357,7 @@ not the buffer the command happens to run in (the prompt window)."
                 session (current-buffer) (point))))
       (agent-ide-inline--on-chunk session "```elisp\n(progn\n  (message ")
       (agent-ide-inline--on-chunk session "\"hi\"))\n```\n")
+      (agent-ide-stream-flush (overlay-get ov 'agent-ide-stream))
       (let* ((plist (overlay-get ov 'agent-ide-inline))
              (src (plist-get plist :src)))
         (with-current-buffer src
@@ -378,6 +380,7 @@ not the buffer the command happens to run in (the prompt window)."
                 session (current-buffer) (point))))
       (agent-ide-inline--on-chunk session "hello ")
       (agent-ide-inline--on-chunk session "world")
+      (agent-ide-stream-flush (overlay-get ov 'agent-ide-stream))
       (let* ((plist (overlay-get ov 'agent-ide-inline))
              (src (plist-get plist :src)))
         (should (buffer-live-p src))

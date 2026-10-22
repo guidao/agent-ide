@@ -966,6 +966,8 @@
                                                 "![icon](assets/agent-ide-icon.png")
         (agent-ide-renderer-append-stream-chunk session 'message ")")
         (agent-ide-renderer-append-stream-chunk session 'message "\nmore text")
+        (agent-ide-stream-flush
+         (agent-ide--session-metadata-get session :stream-renderer))
         (should (= 1 (length agent-ide-media--items)))
         (should (equal "draft" (agent-ide-renderer-current-input session)))
         (goto-char (overlay-start (car agent-ide-media--items)))

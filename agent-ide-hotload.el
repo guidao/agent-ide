@@ -24,6 +24,7 @@
     "agent-ide-protocol.el"
     "agent-ide-latex.el"
     "agent-ide-media.el"
+    "agent-ide-stream.el"
     "agent-ide-renderer.el"
     "agent-ide-session-mode.el"
     "agent-ide-session.el"

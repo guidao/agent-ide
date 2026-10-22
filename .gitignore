@@ -1,3 +1,7 @@
 *.elc
 .superpowers/
 .worktrees/
+
+# Local session history and temporary index files
+/sessions.json
+/.sessions-*

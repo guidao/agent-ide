@@ -179,6 +179,13 @@ The header shows: an animated Agent IDE icon · **model name** · **project dire
 - **Plan rendering** — when the agent produces a plan, entries are listed inline.
 - **Read-only transcript** — all agent output is frozen; only the current prompt is editable.
 
+Streaming Markdown refreshes are batched every 50 ms in both the transcript
+and inline viewport. Completed paragraphs and code blocks retain their rendering
+while new text arrives. Very long unfinished blocks refresh less frequently to
+bound repeated parsing; finishing the reply immediately reconciles the full
+Markdown. Set `agent-ide-stream-render-interval` to adjust the batching delay
+(zero disables batching). Pending refreshes are cancelled when their buffer closes.
+
 Use `![description](path-or-url)` for images and animations, or
 `[watch](clip.mp4)` for video. Local paths resolve against the session project;
 paths containing spaces can use `![description](<images/my picture.png>)`.
@@ -343,7 +350,7 @@ Opens each session in a right-side window at 42% width.
 | `agent-ide-reload-all` | — | Reload all project files in dependency order |
 | `agent-ide-reload-last` | — | Reload the most recently loaded file |
 
-File load order: `core` → `history` → `protocol` → `latex` → `media` → `renderer` → `session-mode` → `session` → `transcript` → `sidebar` → `inline` → `agent-ide`.
+File load order: `core` → `history` → `protocol` → `latex` → `media` → `stream` → `renderer` → `session-mode` → `session` → `transcript` → `sidebar` → `inline` → `agent-ide`.
 
 Run restoration tests with installed `acp` and `valign` packages:
 
@@ -356,6 +363,16 @@ emacs -Q --batch --eval '(progn (require (quote package)) (package-initialize))'
 The process integration test uses Python 3 and a local ACP fixture with temporary
 session data. It exercises process exit, reconnection, cold restoration and
 continued prompting without contacting an agent service.
+
+Run streaming performance and lifecycle regression tests with:
+
+```sh
+emacs -Q --batch --eval '(progn (require (quote package)) (package-initialize))' \
+  -L . -l agent-ide-stream-test.el -f ert-run-tests-batch-and-exit
+```
+
+These check bounded rendering work even with batching disabled, cross-chunk
+Markdown, final flushing and timer cleanup without contacting an agent service.
 
 Run formula preview tests with:
 
@@ -383,6 +400,7 @@ agent-ide.el              Entry point, defcustom, require all
 ├── agent-ide-core.el     Session struct, helpers, buffer management
 ├── agent-ide-history.el  Persistent session index and completion candidates
 ├── agent-ide-renderer.el Transcript rendering, markdown, diff, folds, faces
+├── agent-ide-stream.el   Batched streaming Markdown and completed-block reuse
 ├── agent-ide-latex.el    Math recognition and asynchronous TeX formula previews
 ├── agent-ide-media.el    Image downloads, previews and canvas-video integration
 ├── agent-ide-protocol.el ACP bridge (init, prompt, cancel, fs ops)

@@ -433,11 +433,20 @@ the reference context (region, line, defun, window, buffer)."
       (agent-ide-inline--response-overlay-mode 1))
     ov))
 
+(defun agent-ide-inline--stream-state (ov)
+  "Return OV's streaming renderer, adopting existing views after hot reload."
+  (or (overlay-get ov 'agent-ide-stream)
+      (let ((src (plist-get (overlay-get ov 'agent-ide-inline) :src)))
+        (when (buffer-live-p src)
+          (with-current-buffer src
+            (let ((state (agent-ide-stream-create
+                          (point-min) #'agent-ide-renderer-render-markdown-region
+                          (lambda () (agent-ide-inline--response-overlay-render ov)))))
+              (set-marker (agent-ide-stream-end state) (point-max))
+              (overlay-put ov 'agent-ide-stream state)))))))
+
 (defun agent-ide-inline--response-overlay-append-chunk (ov chunk)
-  "Append CHUNK to response overlay OV and refresh its display.
-Re-renders the whole response buffer so markdown constructs that span
-multiple chunks (fences, emphasis) render once complete, matching the
-transcript's streaming behavior."
+  "Append CHUNK to response overlay OV and schedule a batched refresh."
   (when (and ov (overlayp ov) (overlay-buffer ov))
     (let* ((plist (overlay-get ov 'agent-ide-inline))
            (src (plist-get plist :src)))
@@ -445,10 +454,8 @@ transcript's streaming behavior."
         (with-current-buffer src
           (goto-char (point-max))
           (insert chunk)
-          (save-excursion
-            (agent-ide-renderer-render-markdown-region
-             (point-min) (point-max)))))
-      (agent-ide-inline--response-overlay-render ov))))
+          (agent-ide-stream-queue
+           (agent-ide-inline--stream-state ov) (point-max)))))))
 
 (defun agent-ide-inline--response-overlay-render (ov)
   "Render response overlay OV as an after-string viewport slice."
@@ -655,6 +662,8 @@ With prefix argument ABORT, also cancel the session's active turn."
   (when-let* ((ov (alist-get session agent-ide-inline--overlays))
               ((overlayp ov))
               ((overlay-buffer ov)))
+    (when-let* ((state (agent-ide-inline--stream-state ov)))
+      (agent-ide-stream-flush state t))
     (let ((plist (overlay-get ov 'agent-ide-inline)))
       (setf (plist-get plist :done) t)
       (overlay-put ov 'agent-ide-inline plist))
@@ -666,6 +675,8 @@ With prefix argument ABORT, also cancel the session's active turn."
   (when-let* ((ov (alist-get session agent-ide-inline--overlays))
               ((overlayp ov))
               ((overlay-buffer ov)))
+    (when-let* ((state (agent-ide-inline--stream-state ov)))
+      (agent-ide-stream-flush state t))
     (let ((plist (overlay-get ov 'agent-ide-inline)))
       (setf (plist-get plist :header)
             (format "Error: %s"

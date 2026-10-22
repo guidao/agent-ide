@@ -19,6 +19,7 @@
 (require 'agent-ide-core)
 (require 'agent-ide-latex)
 (require 'agent-ide-media)
+(require 'agent-ide-stream)
 
 (defconst agent-ide-renderer--directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
@@ -1752,6 +1753,7 @@ When VERBATIM is non-nil, preserve trailing whitespace for draft restoration."
        (unless (and (eq (agent-ide-session-current-stream-kind session) kind)
                     (markerp (agent-ide-session-current-stream-marker session))
                     (marker-buffer (agent-ide-session-current-stream-marker session)))
+         (agent-ide-renderer-reset-stream session)
          (let* ((title (agent-ide-renderer--stream-title kind))
                 (fold (and (eq kind 'thought)
                            (agent-ide-renderer--insert-foldable-block
@@ -1780,11 +1782,14 @@ When VERBATIM is non-nil, preserve trailing whitespace for draft restoration."
          (when (eq kind 'thought)
            (add-text-properties start (point) '(face agent-ide-muted-face)))
          (unless (eq kind 'thought)
-           (agent-ide-renderer-render-markdown-region
-            (marker-position
-             (or (agent-ide--session-metadata-get
-                  session :current-stream-start-marker)
-                 (agent-ide-session-current-stream-marker session)))
+           (agent-ide-stream-queue
+            (or (agent-ide--session-metadata-get session :stream-renderer)
+                ;; Also adopt a reply already streaming when hot-reloaded.
+                (agent-ide--session-metadata-put
+                 session :stream-renderer
+                 (agent-ide-stream-create
+                  (agent-ide--session-metadata-get session :current-stream-start-marker)
+                  #'agent-ide-renderer-render-markdown-region)))
             (point)))
          (when-let* ((overlay (and (eq kind 'thought)
                                    (agent-ide--session-metadata-get
@@ -1796,7 +1801,12 @@ When VERBATIM is non-nil, preserve trailing whitespace for draft restoration."
          (set-marker (agent-ide-session-current-stream-marker session) (point)))))))
 
 (defun agent-ide-renderer-reset-stream (session)
-  "Reset SESSION stream grouping."
+  "Flush pending Markdown and reset SESSION stream grouping."
+  (when-let* ((state (agent-ide--session-metadata-get session :stream-renderer)))
+    (unwind-protect
+        (agent-ide-stream-flush state t)
+      (agent-ide-stream-dispose state)
+      (agent-ide--session-metadata-put session :stream-renderer nil)))
   (setf (agent-ide-session-current-stream-kind session) nil)
   (setf (agent-ide-session-current-stream-marker session) nil)
   (agent-ide--session-metadata-put session :current-stream-overlay nil)
@@ -1804,17 +1814,8 @@ When VERBATIM is non-nil, preserve trailing whitespace for draft restoration."
 
 (defun agent-ide-renderer-finish-stream (session)
   "Terminate SESSION current stream cleanly before the prompt."
-  (when (eq (agent-ide-session-current-stream-kind session) 'message)
-    (when-let* ((start-marker (agent-ide--session-metadata-get
-                               session :current-stream-start-marker))
-                (end-marker (agent-ide-session-current-stream-marker session))
-                ((marker-buffer start-marker))
-                ((marker-buffer end-marker)))
-      (with-current-buffer (agent-ide-session-buffer session)
-        (agent-ide-renderer--writable
-          (agent-ide-renderer-render-markdown-region
-           (marker-position start-marker)
-           (marker-position end-marker))))))
+  (when-let* ((state (agent-ide--session-metadata-get session :stream-renderer)))
+    (agent-ide-stream-flush state t))
   (when-let* ((marker (or (agent-ide--session-metadata-get
                            session :active-input-boundary-marker)
                           (agent-ide--session-metadata-get
