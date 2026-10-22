@@ -9,6 +9,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'face-remap)
+(require 'image)
 
 (defface agent-ide-table-face
   '((t :inherit fixed-pitch))
@@ -31,13 +32,17 @@
 (defvar-local agent-ide-table--border-font-family nil)
 (defvar-local agent-ide-table-display-window nil
   "Optional host window for tables in hidden inline-response buffers.")
+(defvar agent-ide-latex-updated-functions)
+(defvar agent-ide-latex--updated-region)
 (declare-function agent-ide-renderer-open-url "agent-ide-renderer" (url))
 
 (defun agent-ide-table--cells (line)
   "Split a pipe row LINE, respecting escapes and matched inline code."
   (let ((i 0) (start 0) (len (length line)) parts separators)
     (while (< i len)
-      (pcase (aref line i)
+      (if (get-text-property i 'agent-ide-latex line)
+          (setq i (next-single-property-change i 'agent-ide-latex line len))
+        (pcase (aref line i)
         (?\\ (setq i (min len (+ i 2))))
         (?` (let* ((beg i)
                    (end (progn (while (and (< i len) (= (aref line i) ?`))
@@ -47,7 +52,7 @@
         (?| (push (string-trim (substring line start i)) parts)
             (push i separators)
             (setq i (1+ i) start i))
-        (_ (cl-incf i))))
+        (_ (cl-incf i)))))
     (when separators
       (push (string-trim (substring line start)) parts)
       (setq parts (nreverse parts))
@@ -67,11 +72,18 @@
   "Copy visible text of CELL, retaining inline colors and link actions."
   (let ((pos 0) parts)
     (while (< pos (length cell))
-      (let* ((display (get-text-property pos 'display cell))
-             (end (if (and (stringp display) (not (string-empty-p display)))
-                      (next-single-property-change pos 'display cell (length cell))
-                    (next-property-change pos cell (length cell))))
-             (part (if (stringp display) (copy-sequence display) (substring cell pos end)))
+      (let* ((preview (get-text-property pos 'agent-ide-latex-preview cell))
+             (display (or (car-safe preview) (get-text-property pos 'display cell)))
+             (image (and (eq (car-safe display) 'image) display))
+             (end (cond (preview (next-single-property-change pos 'agent-ide-latex-preview cell (length cell)))
+                        ((or image (and (stringp display) (not (string-empty-p display))))
+                         (next-single-property-change pos 'display cell (length cell)))
+                        (t (next-property-change pos cell (length cell)))))
+             (part (cond (image (propertize "\uFFFC" 'agent-ide-table-image
+                                             (list image (substring-no-properties cell pos end))
+                                             'help-echo (substring-no-properties cell pos end)))
+                         ((stringp display) (copy-sequence display))
+                         (t (substring cell pos end))))
              (url (get-text-property pos 'agent-ide-url cell)))
         (remove-text-properties 0 (length part)
                                 '(display nil invisible nil read-only nil field nil
@@ -94,14 +106,62 @@
       (add-face-text-property 0 (length text) 'agent-ide-table-face nil text)
       text)))
 
+(defun agent-ide-table--units (text)
+  "Split TEXT into graphemes and indivisible image atoms."
+  (let ((pos 0) units)
+    (while (< pos (length text))
+      (let ((end (next-single-property-change pos 'agent-ide-table-image text (length text))))
+        (if (get-text-property pos 'agent-ide-table-image text)
+            (push (substring text pos end) units)
+          (dolist (glyph (string-glyph-split (substring text pos end))) (push glyph units)))
+        (setq pos end)))
+    (nreverse units)))
+
+(defun agent-ide-table--text-width (text)
+  "Return TEXT's grid width, counting each image atom once."
+  (if (not (text-property-not-all 0 (length text) 'agent-ide-table-image nil text))
+      (string-width text)
+    (cl-loop for unit in (agent-ide-table--units text)
+             sum (or (get-text-property 0 'agent-ide-table-columns unit) (string-width unit)))))
+
+(defun agent-ide-table--images (text window &optional limit)
+  "Size image atoms in TEXT for WINDOW, fitting within LIMIT columns."
+  (if (not (text-property-not-all 0 (length text) 'agent-ide-table-image nil text)) text
+    (let ((pos 0) parts)
+      (while (< pos (length text))
+        (let* ((atom (get-text-property pos 'agent-ide-table-image text))
+               (end (next-single-property-change pos 'agent-ide-table-image text (length text))))
+          (push
+           (if (not atom) (substring text pos end)
+             (if (not (display-images-p (and window (window-frame window)))) (cadr atom)
+               (let* ((image (copy-sequence (car atom)))
+                      (unit (max 1 (window-font-width window 'agent-ide-table-face)))
+                      (natural (car (image-size image t (and window (window-frame window)))))
+                      (pixels (max 1 (if limit (min natural (* limit unit)) natural)))
+                      (columns (ceiling pixels unit))
+                      (padding (- (* columns unit) pixels)))
+                 ;; Never mutate a shared TeX cache entry when fitting a cell.
+                 (setf (image-property image :width) pixels
+                       (image-property image :height) nil
+                       (image-property image :max-width) nil
+                       (image-property image :max-height) nil
+                       (image-property image :scale) 1)
+                 (propertize
+                  (concat (propertize "\uFFFC" 'display image)
+                          (propertize "\u200B" 'display `(space :width (,padding))))
+                  'agent-ide-table-image atom 'agent-ide-table-columns columns
+                  'help-echo (cadr atom))))) parts)
+          (setq pos end)))
+      (apply #'concat (nreverse parts)))))
+
 (defun agent-ide-table--metrics (rows columns)
   "Measure natural and minimum character widths of ROWS with COLUMNS cells."
   (let ((natural (make-vector columns 1)) (minimum (make-vector columns 1)))
     (dolist (row rows)
       (cl-loop for cell in (nth 2 row) for i from 0 below columns do
-               (aset natural i (max (aref natural i) (string-width cell)))
-               (dolist (glyph (string-glyph-split cell))
-                 (aset minimum i (max (aref minimum i) (string-width glyph))))))
+               (aset natural i (max (aref natural i) (agent-ide-table--text-width cell)))
+               (dolist (glyph (agent-ide-table--units cell))
+                 (aset minimum i (max (aref minimum i) (if (get-text-property 0 'agent-ide-table-image glyph) 1 (string-width glyph)))))))
     (cons natural minimum)))
 
 (defun agent-ide-table--widths (metrics available)
@@ -121,10 +181,10 @@
 
 (defun agent-ide-table--split-word (text width)
   "Split long TEXT at WIDTH columns, preserving graphemes, faces and links."
-  (if (<= (string-width text) width) (list text)
+  (if (<= (agent-ide-table--text-width text) width) (list text)
     (let ((used 0) pieces lines)
-      (dolist (glyph (string-glyph-split text))
-        (let ((size (string-width glyph)))
+      (dolist (glyph (agent-ide-table--units text))
+        (let ((size (agent-ide-table--text-width glyph)))
           (when (and pieces (> (+ used size) width))
             (push (apply #'concat (nreverse pieces)) lines)
             (setq pieces nil used 0))
@@ -135,31 +195,31 @@
 
 (defun agent-ide-table--wrap (text width)
   "Wrap TEXT at WIDTH columns, keeping words together when possible."
-  (if (<= (string-width text) width) (list text)
+  (if (<= (agent-ide-table--text-width text) width) (list text)
     (let ((line "") lines)
       (dolist (word (split-string text " +" t))
         (cond
-         ((> (string-width word) width)
+         ((> (agent-ide-table--text-width word) width)
           (unless (string-empty-p line) (push line lines))
           (let ((chunks (agent-ide-table--split-word word width)))
             (dolist (chunk (butlast chunks)) (push chunk lines))
             (setq line (car (last chunks)))))
          ((string-empty-p line) (setq line word))
-         ((<= (+ (string-width line) 1 (string-width word)) width)
+         ((<= (+ (agent-ide-table--text-width line) 1 (agent-ide-table--text-width word)) width)
           (setq line (concat line " " word)))
          (t (push line lines) (setq line word))))
       (unless (string-empty-p line) (push line lines))
       (or (nreverse lines) (list "")))))
 
-(defun agent-ide-table--row (cells widths aligns header)
+(defun agent-ide-table--row (cells widths aligns header &optional window)
   "Lay out CELLS with WIDTHS and ALIGNS; emphasize HEADER cells."
-  (let ((wrapped (cl-mapcar (lambda (cell width) (agent-ide-table--wrap (or cell "") width))
+  (let ((wrapped (cl-mapcar (lambda (cell width) (agent-ide-table--wrap (agent-ide-table--images (or cell "") window width) width))
                             cells widths)) lines)
     (while (seq-some #'identity wrapped)
       (let (parts)
         (cl-loop for rest on wrapped for width in widths for align in aligns do
                  (let* ((text (copy-sequence (or (pop (car rest)) "")))
-                        (pad (max 0 (- width (string-width text))))
+                        (pad (max 0 (- width (agent-ide-table--text-width text))))
                         (left (pcase align ('right pad) ('center (/ pad 2)) (_ 0))))
                    (when header
                      (add-face-text-property 0 (length text) 'agent-ide-table-header-face nil text))
@@ -200,8 +260,17 @@
       (agent-ide-table--drop-views table)
       (dolist (view windows)
         (let* ((indent (overlay-get table 'indent))
-               (widths (agent-ide-table--widths (overlay-get table 'metrics) (- (cdr view) (string-width indent))))
+               (rows (overlay-get table 'rows))
                (aligns (overlay-get table 'aligns))
+               (metrics (if (overlay-get table 'images)
+                            (agent-ide-table--metrics
+                             (mapcar (lambda (row)
+                                       (list (car row) (cadr row)
+                                             (mapcar (lambda (cell) (agent-ide-table--images cell (car view)))
+                                                     (nth 2 row)))) rows)
+                             (length aligns))
+                          (overlay-get table 'metrics)))
+               (widths (agent-ide-table--widths metrics (- (cdr view) (string-width indent))))
                (index 0))
           (dolist (row (overlay-get table 'rows))
             (let* ((beg (+ (overlay-start table) (nth 0 row)))
@@ -211,7 +280,7 @@
                         (propertize
                          (concat "├─" (mapconcat (lambda (w) (make-string w ?─)) widths "─┼─") "─┤")
                          'face 'agent-ide-table-border-face 'agent-ide-table-border t)
-                      (agent-ide-table--row (nth 2 row) widths aligns (= index 0))))
+                      (agent-ide-table--row (nth 2 row) widths aligns (= index 0) (car view))))
                    (ov (make-overlay beg end nil nil nil)))
               (setq display (concat indent (replace-regexp-in-string "\n" (concat "\n" indent) display t t)))
               (agent-ide-table--apply-fonts display)
@@ -275,6 +344,11 @@
                   (overlay-put table 'evaporate t)
                   (overlay-put table 'source source)
                   (overlay-put table 'rows rows)
+                  (overlay-put table 'images
+                               (seq-some (lambda (row)
+                                           (seq-some (lambda (cell) (text-property-not-all
+                                                                    0 (length cell) 'agent-ide-table-image nil cell))
+                                                     (nth 2 row))) rows))
                   (overlay-put table 'indent indent)
                   (overlay-put table 'aligns aligns)
                   (overlay-put table 'metrics (agent-ide-table--metrics rows columns))
@@ -367,11 +441,23 @@ Explicit families also survive display in an inline viewport's host buffer."
           (add-face-text-property pos end (list :family family) nil display))
         (setq pos end)))))
 
+(defun agent-ide-table--preview-updated ()
+  "Rebuild only tables containing the formula whose preview just changed."
+  (when (and (boundp 'agent-ide-latex--updated-region) agent-ide-latex--updated-region)
+    (let ((tables (seq-filter (lambda (o) (overlay-get o 'agent-ide-table))
+                              (overlays-in (car agent-ide-latex--updated-region)
+                                           (cdr agent-ide-latex--updated-region)))))
+      (dolist (table tables)
+        (let ((start (overlay-start table)) (end (overlay-end table)))
+          (agent-ide-table--dispose table)
+          (agent-ide-table-render start end))))))
+
 (defun agent-ide-table-enable ()
   "Install buffer-local lifecycle hooks for table views."
   (unless agent-ide-table--enabled
     (setq agent-ide-table--enabled t)
     (agent-ide-table--configure-fonts)
+    (add-hook 'agent-ide-latex-updated-functions #'agent-ide-table--preview-updated -10 t)
     (add-hook 'before-change-functions #'agent-ide-table--before-change nil t)
     (add-hook 'after-change-functions #'agent-ide-table--after-change nil t)
     (add-hook 'window-size-change-functions #'agent-ide-table--window-change nil t)

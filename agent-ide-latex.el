@@ -39,6 +39,9 @@ Use an installed font name or a TeX-discoverable font filename."
   "Functions called with no arguments after an asynchronous preview update.
 They run in the buffer containing the formula source.")
 
+(defvar agent-ide-latex--updated-region nil
+  "Dynamically bound source bounds while running preview update hooks.")
+
 (defvar agent-ide-latex--cache (make-hash-table :test 'equal))
 (defvar agent-ide-latex--queue nil)
 (defvar agent-ide-latex--process nil)
@@ -347,7 +350,8 @@ unfinished code fences.  Dollar math stays on one line unless it uses $$."
             (when (eq (current-buffer) (window-buffer (selected-window)))
               (agent-ide-latex--reveal-at-point))
             (condition-case err
-		(run-hooks 'agent-ide-latex-updated-functions)
+                (let ((agent-ide-latex--updated-region (cons (+ begin 0) (+ end 0))))
+                  (run-hooks 'agent-ide-latex-updated-functions))
               (error (message "Agent IDE preview refresh: %s" (error-message-string err))))))))
     (set-marker begin nil)
     (set-marker end nil)))
