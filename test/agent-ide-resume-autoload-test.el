@@ -1,6 +1,6 @@
 ;;; agent-ide-resume-autoload-test.el --- Cold-start resume -*- lexical-binding: t; -*-
 
-;; Run in a fresh batch Emacs with acp and valign on load-path.  Do not load
+;; Run in a fresh batch Emacs with acp on load-path.  Do not load
 ;; agent-ide or the other session tests before this file.
 (require 'ert)
 (require 'cl-lib)

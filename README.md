@@ -9,7 +9,6 @@
 
 - **Emacs** ≥ 29.1
 - **[acp.el](https://github.com/xenodium/acp.el)** ≥ 0.11.1 — ACP client library
-- **[valign](https://github.com//casouri/valign)** ≥ 3.1 — visual table alignment
 
 ## Installation
 
@@ -216,7 +215,7 @@ The header shows: an animated Agent IDE icon · **model name** · **project dire
 
 ### Transcript features
 
-- **Markdown rendering** — code fences (syntax-highlighted), inline code, bold/italic, links, headings, and pipe tables (via `valign`).
+- **Markdown rendering** — code fences (syntax-highlighted), inline code, bold/italic, links, headings, and wrapped pipe tables. Tables use a cached character-width layout inspired by [markdown-ts-appear](https://github.com/Thysrael/markdown-ts-appear), with independent layouts for different window widths. The original Markdown remains available for copying. Cell text (including inline code) prefers your monospaced default font; borders prefer an installed Sarasa SC grid font. Customize `agent-ide-table-face` and `agent-ide-table-border-face` independently. Both fonts should have the same Latin character width, with CJK glyphs occupying two columns and border glyphs one. After changing faces, run `M-x agent-ide-table-refresh` to refresh existing tables. No `valign` or Tree-sitter dependency is needed.
 - **Streaming messages** — agent text appears word-by-word, markdown-rendered as it arrives.
 - **Media previews** — Markdown images render inline; GIF/APNG, animated WebP and video links use `canvas-video`. ACP image content blocks also render in messages and expanded tool output.
 - **Thinking blocks** — agent reasoning is shown inside foldable blocks (collapsed by default).
@@ -396,13 +395,13 @@ Opens each session in a right-side window at 42% width.
 | `agent-ide-reload-all` | — | Reload all project files in dependency order |
 | `agent-ide-reload-last` | — | Reload the most recently loaded file |
 
-File load order: `core` → `history` → `protocol` → `latex` → `media` → `stream` → `renderer` → `session-mode` → `session` → `transcript` → `sidebar` → `inline` → `agent-ide`.
+File load order: `core` → `history` → `protocol` → `latex` → `media` → `stream` → `table` → `renderer` → `session-mode` → `session` → `transcript` → `sidebar` → `inline` → `agent-ide`.
 
-Run restoration tests with installed `acp` and `valign` packages:
+Run restoration tests with the installed `acp` package:
 
 ```sh
 emacs -Q --batch --eval '(progn (require (quote package)) (package-initialize))' \
-  -L . -l acp -l valign -l agent-ide-resume-test.el \
+  -L . -l acp -l agent-ide-resume-test.el \
   -f ert-run-tests-batch-and-exit
 ```
 

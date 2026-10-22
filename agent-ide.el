@@ -2,7 +2,7 @@
 
 ;; Author: Feng
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (acp "0.11.1") (valign "3.1"))
+;; Package-Requires: ((emacs "29.1") (acp "0.11.1"))
 ;; Keywords: ai, agent, acp
 
 ;;; Commentary:

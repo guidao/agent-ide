@@ -25,6 +25,7 @@
     "agent-ide-latex.el"
     "agent-ide-media.el"
     "agent-ide-stream.el"
+    "agent-ide-table.el"
     "agent-ide-renderer.el"
     "agent-ide-attachment.el"
     "agent-ide-elicitation.el"

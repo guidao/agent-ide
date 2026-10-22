@@ -6,11 +6,6 @@
 (unless (featurep 'acp)
   (provide 'acp))
 
-;; Stub valign like agent-ide-sidebar-test.el if needed before requiring session:
-(unless (featurep 'valign)
-  (provide 'valign)
-  (defun valign-mode (&rest _))
-  (defun valign--guess-table-type (&rest _)))
 
 (require 'agent-ide-session)
 

@@ -12,17 +12,6 @@
 (require 'seq)
 (require 'subr-x)
 (require 'thingatpt)
-(require 'valign)
-
-(defun agent-ide--valign-guess-table-type (orig-fn)
-  "Return 'markdown for `agent-ide-session-mode' buffers."
-  (if (derived-mode-p 'agent-ide-session-mode)
-      'markdown
-    (funcall orig-fn)))
-
-(advice-add 'valign--guess-table-type :around
-            #'agent-ide--valign-guess-table-type)
-
 (declare-function agent-ide-submit "agent-ide-session" ())
 (declare-function agent-ide-interrupt "agent-ide-session" ())
 (declare-function agent-ide-restart "agent-ide-session" ())
@@ -468,7 +457,7 @@ Full URLs open with `browse-url'; file paths open with `find-file'."
   (add-hook 'completion-at-point-functions
             #'agent-ide-session-mode-completion-at-point
             nil t)
-  (valign-mode 1))
+  (agent-ide-table-enable))
 
 (provide 'agent-ide-session-mode)
 

@@ -21,6 +21,7 @@
 (require 'agent-ide-latex)
 (require 'agent-ide-media)
 (require 'agent-ide-stream)
+(require 'agent-ide-table)
 
 (defconst agent-ide-renderer--directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
@@ -950,25 +951,9 @@ Lines matching the Codex tool-body pattern `  $ ...' get muted."
                                '(face agent-ide-muted-face
                                  agent-ide-markdown t)))))))
 
-(defvar valign-mode)
-(defvar valign-not-align-after-list)
-
-(defun agent-ide-renderer--align-tables (start end)
-  "Align tables in START..END using a window displaying this buffer.
-Asynchronous output must not inherit another window's pixel measurements
-or the command-based suppression intended for interactive table editing."
-  (when (and (fboundp 'valign-region) (bound-and-true-p valign-mode))
-    (when-let* ((window (get-buffer-window (current-buffer) t))
-               ((display-graphic-p (window-frame window))))
-      (with-selected-window window
-        (let ((valign-not-align-after-list nil)
-              (inhibit-read-only t))
-          (save-excursion
-            (valign-region start end)))))))
-
 (defun agent-ide-renderer-render-markdown-region (start end)
   "Apply lightweight Markdown rendering in START..END.
-Table alignment is handled by `valign-mode'."
+Tables use cached character-width layouts without changing source text."
   (when (< start end)
     (let ((end-marker (copy-marker end t))
           (formulas (agent-ide-latex-prepare start end)))
@@ -979,12 +964,9 @@ Table alignment is handled by `valign-mode'."
       (agent-ide-renderer--render-bare-urls start (marker-position end-marker))
       (agent-ide-renderer--render-markdown-inline-code start (marker-position end-marker))
       (agent-ide-renderer--render-markdown-emphasis start (marker-position end-marker))
-      ;; Explicitly align tables via valign after markdown rendering.
-      ;; jit-lock may not fire promptly during streaming, so we force
-      ;; alignment here to ensure tables in agent output are lined up.
-      (agent-ide-renderer--align-tables start (marker-position end-marker))
       (agent-ide-latex-render formulas)
       (agent-ide-media-render start (marker-position end-marker))
+      (agent-ide-table-render start (marker-position end-marker))
       (set-marker end-marker nil))))
 
 (cl-defun agent-ide-renderer--insert-foldable-block
@@ -1484,6 +1466,7 @@ Use a compact text fallback in terminals and builds without PNG support."
 (defun agent-ide-renderer-initialize-buffer (session)
   "Initialize SESSION transcript buffer."
   (with-current-buffer (agent-ide-session-buffer session)
+    (agent-ide-table-cleanup)
     (agent-ide-renderer--writable
       (erase-buffer)
       (let ((start (point)))

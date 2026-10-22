@@ -442,7 +442,7 @@ the reference context (region, line, defun, window, buffer)."
       (text-mode)
       (setq-local default-directory (agent-ide-session-directory session))
       (setq-local agent-ide-media-inline-video nil)
-      (valign-mode 1)
+      (agent-ide-table-enable)
       (add-hook 'agent-ide-media-updated-functions
                 (lambda () (agent-ide-inline--response-overlay-render ov)) nil t)
       (add-hook 'agent-ide-latex-updated-functions
@@ -512,7 +512,10 @@ the reference context (region, line, defun, window, buffer)."
             (and (buffer-live-p src)
                  (with-current-buffer src
                    (agent-ide-inline--view-start index)
-                   (buffer-substring
+                   (setq agent-ide-table-display-window
+                         (get-buffer-window (overlay-buffer ov) t))
+                   (agent-ide-table-refresh)
+                   (agent-ide-table-substring
                     (point)
                     (pos-eol height)))))
            (up (if (> index 0) "⬆ " "  "))

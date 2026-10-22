@@ -404,10 +404,11 @@
        "| Name | Age |\n|---|---:|\n| Bob | 3 |")
       (agent-ide-renderer-finish-stream session)
       (goto-char (point-min))
-      (should (search-forward "| Name | Age  |" nil t))
-      (should (search-forward "| Bob  | 3    |" nil t))
-      (should (get-text-property (line-beginning-position)
-                                 'agent-ide-markdown)))))
+      (should (search-forward "| Name | Age |" nil t))
+      (should (search-forward "| Bob | 3 |" nil t))
+      (should (= 1 (length agent-ide-table--tables)))
+      (should (string-match-p "│ Bob  │   3 │"
+                              (agent-ide-table-substring (point-min) (point-max)))))))
 
 (ert-deftest agent-ide-renderer-defers-streaming-markdown-table-rewrite ()
   "Assistant message streaming does not rewrite pipe tables before completion."
@@ -427,8 +428,11 @@
        "| Bob | 3 |")
       (agent-ide-renderer-finish-stream session)
       (goto-char (point-min))
-      (should (search-forward "| Name | Age  |" nil t))
-      (should (search-forward "| Bob  | 3    |" nil t)))))
+      (should (search-forward "| Name | Age |" nil t))
+      (should (search-forward "| Bob | 3 |" nil t))
+      (should (= 1 (length agent-ide-table--tables)))
+      (should (string-match-p "│ Bob  │   3 │"
+                              (agent-ide-table-substring (point-min) (point-max)))))))
 
 (ert-deftest agent-ide-renderer-animates-running-placeholder ()
   "Running placeholders cycle their trailing ellipsis frame."

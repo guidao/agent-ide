@@ -7,10 +7,6 @@
 
 (unless (featurep 'acp)
   (provide 'acp))
-(unless (featurep 'valign)
-  (provide 'valign)
-  (defun valign-mode (&rest _))
-  (defun valign--guess-table-type (&rest _)))
 
 (require 'agent-ide-core)
 (require 'agent-ide-renderer)
