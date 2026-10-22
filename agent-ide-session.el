@@ -252,6 +252,33 @@ With prefix argument, prompt for DIRECTORY."
         (agent-ide--display-buffer (agent-ide-session-buffer session))
       (agent-ide--start-session directory))))
 
+;;;###autoload
+(defun agent-ide-switch-buffer ()
+  "Select an open Agent IDE buffer using ordinary buffer completion.
+Only live session buffers are offered, including disconnected sessions.
+Default to the most recently visited other session; preserve all drafts."
+  (interactive)
+  (agent-ide--cleanup-dead-sessions)
+  (let* ((session-buffers (mapcar #'agent-ide-session-buffer agent-ide--sessions))
+         (buffers (cl-remove-if-not (lambda (buffer) (memq buffer session-buffers))
+                                    (buffer-list)))
+         (default (or (cl-find-if (lambda (buffer) (not (eq buffer (current-buffer))))
+                                  buffers)
+                      (car buffers))))
+    (unless buffers
+      (user-error "No open Agent IDE sessions"))
+    (let* ((name (read-buffer
+                  "Switch to agent buffer: " (buffer-name default) t
+                  (lambda (candidate)
+                    (memq (get-buffer (if (consp candidate) (cdr candidate) candidate))
+                          buffers))))
+           (buffer (get-buffer name))
+           (agent-ide-select-window-on-open t)
+           (agent-ide-new-session-split nil))
+      (unless (and (buffer-live-p buffer) (memq buffer buffers))
+        (user-error "Selected Agent IDE buffer is no longer available"))
+      (agent-ide--display-buffer buffer))))
+
 (defun agent-ide-freeze-user-prompt (session prompt)
   "Record PROMPT in SESSION history and freeze it as a submitted user line.
 Creates a fresh editable prompt.  Does not send to the agent."

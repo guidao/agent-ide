@@ -30,6 +30,7 @@
 (declare-function agent-ide-set-model "agent-ide-session" (model-id))
 (declare-function agent-ide-yank-region "agent-ide-session" ())
 (declare-function agent-ide-sidebar "agent-ide-sidebar" ())
+(declare-function agent-ide-switch-buffer "agent-ide-session" ())
 
 (defun agent-ide-session--pending-permission ()
   "Return the current session and its newest pending permission."
@@ -159,6 +160,9 @@ With prefix argument ALWAYS, select the always-allow option."
     (define-key map (kbd "C-c C-p") #'agent-ide-select-permission-option)
     map)
   "Keymap for `agent-ide-session-mode'.")
+
+;; Update the existing map as well when this file is hot-reloaded.
+(define-key agent-ide-session-mode-map (kbd "C-c C-j") #'agent-ide-switch-buffer)
 
 (defvar agent-ide-session-prompt-minor-mode-map
   (let ((map (make-sparse-keymap)))

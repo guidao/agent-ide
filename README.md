@@ -82,11 +82,18 @@ Type your prompt and press `C-c C-m` (or `Return` with a configured binding) to 
 | `agent-ide-set-model` | `C-c C-s` | Switch the agent model (completing-read) |
 | `agent-ide-yank-region` | `C-c C-y` | Insert the active region as file+line context |
 | `agent-ide-sidebar` | `C-c C-b` | Focus the session sidebar |
+| `agent-ide-switch-buffer` | `C-c C-j` | Choose an open agent buffer with minibuffer completion |
 | `agent-ide-approve-permission` | `C-c C-a` | Allow the newest pending request once; use `C-u` to always allow |
 | `agent-ide-decline-permission` | `C-c C-d` | Decline the newest pending request |
 | `agent-ide-select-permission-option` | `C-c C-p` | Choose any offered permission response or cancel |
 
 ### Continuing a previous conversation
+
+Use `C-c C-j` in any session buffer, including its editable prompt, to choose
+an open agent buffer across projects. It uses ordinary buffer completion, like
+`C-x b`, restricted to agent sessions, and defaults to the most recently visited
+other session. Drafts are preserved and closed buffers are excluded. The command
+is also available as `M-x agent-ide-switch-buffer` from other buffers.
 
 Run `M-x agent-ide-resume` to choose a saved conversation for the current
 project. Use `C-u M-x agent-ide-resume` to search all projects. Candidates
