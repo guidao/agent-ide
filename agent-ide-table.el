@@ -285,7 +285,13 @@
               (setq display (concat indent (replace-regexp-in-string "\n" (concat "\n" indent) display t t)))
               (agent-ide-table--apply-fonts display)
               (overlay-put ov 'agent-ide-table-row t)
-              (overlay-put ov 'display display)
+              ;; Replacement strings do not recursively render display images.
+              ;; Insert rich rows before the hidden source instead, so image
+              ;; and pixel-padding properties reach Emacs's redisplay engine.
+              (if (text-property-not-all 0 (length display) 'agent-ide-table-image nil display)
+                  (progn (overlay-put ov 'display "")
+                         (overlay-put ov 'before-string display))
+                (overlay-put ov 'display display))
               (overlay-put ov 'face 'agent-ide-table-face)
               (overlay-put ov 'priority 20)
               (overlay-put ov 'evaporate t)
@@ -471,7 +477,7 @@ Explicit families also survive display in an inline viewport's host buffer."
     (while (< pos end)
       (if-let* ((row (seq-find (lambda (o) (and (overlay-get o 'agent-ide-table-row)
                                                (= (overlay-start o) pos))) (overlays-at pos))))
-          (progn (push (overlay-get row 'display) pieces)
+          (progn (push (or (overlay-get row 'before-string) (overlay-get row 'display)) pieces)
                  (setq pos (min end (overlay-end row))))
         (let ((next (min end (next-overlay-change pos))))
           (push (buffer-substring pos next) pieces)

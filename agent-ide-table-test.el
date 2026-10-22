@@ -3,7 +3,7 @@
 (require 'agent-ide)
 
 (defun agent-ide-table-test--displays (&optional table window)
-  (mapcar (lambda (o) (overlay-get o 'display))
+  (mapcar (lambda (o) (or (overlay-get o 'before-string) (overlay-get o 'display)))
           (sort (seq-filter (lambda (o) (eq (overlay-get o 'window) window))
                             (copy-sequence (overlay-get (or table (car agent-ide-table--tables)) 'views)))
                 (lambda (a b) (< (overlay-start a) (overlay-start b))))))
@@ -263,3 +263,37 @@
           (forward-line 1))
         (should (equal (car columns) (cadr columns)))
         (should (equal (car columns) (caddr columns)))))))
+
+(ert-deftest agent-ide-table-math-images-reach-redisplay ()
+  "Hit-test the actual window; image properties alone do not prove visibility."
+  (skip-unless (and (display-graphic-p) (image-type-available-p 'svg)))
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((window (selected-window))
+             (image (create-image "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='24'><rect width='40' height='24' fill='red'/></svg>" 'svg t))
+             (visible-image
+              (lambda ()
+                (redisplay t)
+                (cl-loop for y from 0 below (min 160 (window-body-height window t)) by 4
+                         thereis (cl-loop for x from 0 below (min 400 (window-body-width window t)) by 4
+                                          thereis (posn-image (posn-at-x-y x y window)))))))
+        (insert "| Formula | Value |\n|---|---|\n| \\(x\\) | 1 |\n")
+        (goto-char 1)
+        (search-forward "\\(x\\)")
+        (put-text-property (- (point) 5) (point) 'display image)
+        (set-window-buffer window (current-buffer))
+        (agent-ide-table-render 1 (point-max))
+        (goto-char 1)
+        (set-window-start window 1)
+        (let* ((row (seq-find (lambda (o) (overlay-get o 'before-string))
+                              (overlay-get (car agent-ide-table--tables) 'views)))
+               (display (and row (overlay-get row 'before-string))))
+          (should row)
+          (should (funcall visible-image))
+          ;; Reproduce the original bug: nested display does not render images.
+          (overlay-put row 'before-string nil)
+          (overlay-put row 'display display)
+          (should-not (funcall visible-image))
+          (overlay-put row 'display "")
+          (overlay-put row 'before-string display)
+          (should (funcall visible-image)))))))
