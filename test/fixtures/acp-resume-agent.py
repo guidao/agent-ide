@@ -31,14 +31,21 @@ for line in sys.stdin:
     state["requests"].append(method)
     result = {}
     if method == "initialize":
-        caps = {}
+        caps = {"sessionCapabilities": {"list": {}}}
         if capability in ("both", "resume"):
-            caps["sessionCapabilities"] = {"resume": {}}
+            caps["sessionCapabilities"]["resume"] = {}
         if capability in ("both", "load"):
             caps["loadSession"] = True
         result = {"protocolVersion": 1, "agentCapabilities": caps}
+    elif method == "session/list":
+        cwd = state.get("cwd", str(state_path.parent))
+        result = {"sessions": [{"sessionId": "fixture-session", "cwd": cwd,
+                                "title": "Existing conversation",
+                                "updatedAt": "2026-10-22T00:00:00Z"}]
+                  if state["created"] and params.get("cwd", cwd) == cwd else []}
     elif method == "session/new":
         state["created"] = True
+        state["cwd"] = params["cwd"].rstrip("/")
         result = {"sessionId": "fixture-session"}
     elif method in ("session/load", "session/resume", "session/prompt"):
         if not state["created"] or params["sessionId"] != "fixture-session":

@@ -51,6 +51,13 @@
   prompt-history
   prompt-history-index)
 
+(defun agent-ide--session-title (session)
+  "Return SESSION's title as a single display line, or nil."
+  (when-let* ((title (agent-ide--session-metadata-get session :title))
+              ((stringp title))
+              (clean (string-trim (replace-regexp-in-string "[\n\r\t]+" " " (substring-no-properties title)))))
+    (unless (string-empty-p clean) clean)))
+
 (defun agent-ide--timestamp-now ()
   "Return the current timestamp as a display string."
   (format-time-string "%F %T"))

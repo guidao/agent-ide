@@ -17,6 +17,7 @@
 (require 'thingatpt)
 (require 'url-parse)
 (require 'agent-ide-core)
+(require 'agent-ide-config)
 (require 'agent-ide-latex)
 (require 'agent-ide-media)
 (require 'agent-ide-stream)
@@ -1185,6 +1186,12 @@ visibility."
      model '(name title label model id modelId)))))
 
 (defun agent-ide-renderer--model-label (session)
+  "Return the model name from current config, falling back to legacy metadata."
+  (if-let* ((option (agent-ide-config-category session "model")))
+      (map-elt option 'currentValue)
+    (agent-ide-renderer--legacy-model-label session)))
+
+(defun agent-ide-renderer--legacy-model-label (session)
   "Return a model label for SESSION, when known."
   (let* ((models-response (agent-ide-session-models session))
          (current-model-id (and (listp models-response)
@@ -1348,6 +1355,8 @@ Prefers ACP `usage_update' `size', then legacy context-window fields."
                    default-directory)))
          (sep (propertize " · " 'face 'agent-ide-header-separator-face))
          (parts nil))
+    (when-let* ((title (agent-ide--session-title session)))
+      (push (truncate-string-to-width title 60 nil nil "…") parts))
     (when model-label
       (push (propertize model-label 'face 'agent-ide-header-model-face) parts))
     (when dir
@@ -1552,6 +1561,7 @@ Use a compact text fallback in terminals and builds without PNG support."
             (overlay-put overlay 'read-only nil)
             (setf (agent-ide-session-input-overlay session) overlay))
           (agent-ide-renderer-refresh-placeholder session)
+          (when (fboundp 'agent-ide-attachment-refresh) (agent-ide-attachment-refresh session))
           (goto-char input-end)
           (agent-ide-renderer-follow-input session))))))
 

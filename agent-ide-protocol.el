@@ -13,6 +13,9 @@
 (require 'subr-x)
 (require 'agent-ide-core)
 (require 'agent-ide-renderer)
+(require 'agent-ide-config)
+(require 'agent-ide-attachment)
+(require 'agent-ide-elicitation)
 
 (declare-function agent-ide--watch-client "agent-ide-session" (session))
 (declare-function agent-ide--restore-failed "agent-ide-session" (session error))
@@ -86,6 +89,22 @@ Called with (SESSION ERROR) after status is set to idle.")
             (agent-ide--watch-client session)))
       (error (funcall failure `((message . ,(error-message-string err))))))))
 
+(defun agent-ide-protocol-initialize-request ()
+  "Build initialization with the capabilities actually implemented by Agent IDE."
+  (let* ((request (acp-make-initialize-request
+                   :protocol-version 1 :client-info agent-ide-client-info
+                   :read-text-file-capability agent-ide-text-file-capabilities
+                   :write-text-file-capability agent-ide-text-file-capabilities))
+         (params (map-elt request :params))
+         (caps (map-elt params 'clientCapabilities)))
+    (setf (alist-get 'session caps)
+          `((configOptions . ((boolean . ,(make-hash-table :test 'equal))))))
+    (setf (alist-get 'elicitation caps)
+          `((form . ,(make-hash-table :test 'equal))))
+    (setf (alist-get 'clientCapabilities params) caps
+          (alist-get :params request) params)
+    request))
+
 (defun agent-ide-protocol-initialize (session on-ready)
   "Initialize ACP client for SESSION, then call ON-READY."
   (agent-ide--set-status session "initializing")
@@ -93,15 +112,12 @@ Called with (SESSION ERROR) after status is set to idle.")
   (agent-ide-renderer-append-status session "Initializing agent ACP...")
   (agent-ide-protocol-send-request
    session
-   (acp-make-initialize-request
-    :protocol-version 1
-    :client-info agent-ide-client-info
-    :read-text-file-capability agent-ide-text-file-capabilities
-    :write-text-file-capability agent-ide-text-file-capabilities)
+   (agent-ide-protocol-initialize-request)
    :on-success (lambda (response)
                  (setf (agent-ide-session-initialized session) t)
                  (setf (agent-ide-session-capabilities session)
                        (or (map-elt response 'agentCapabilities) response))
+                 (agent-ide--session-metadata-put session :agent-info (map-elt response 'agentInfo))
                  (agent-ide-renderer-append-status session "ACP initialized.")
                  (funcall on-ready))
    :on-failure (lambda (error)
@@ -117,31 +133,33 @@ Called with (SESSION ERROR) after status is set to idle.")
 (defun agent-ide-protocol-set-model (session model-id &optional silent)
   "Send `session/set_model' for SESSION with MODEL-ID.
 When SILENT is non-nil, suppress status messages."
-  (agent-ide--assert-ready session)
-  (agent-ide-protocol-send-request
-   session
-   (acp-make-session-set-model-request
-    :session-id (agent-ide-session-acp-session-id session)
-    :model-id model-id)
-   :on-success (lambda (_response)
-                 ;; Update cached model id in session models data.
-                 (let ((models (agent-ide-session-models session)))
-                   (when (listp models)
-                     (setf (agent-ide-session-models session)
-                           (cons (cons 'currentModelId model-id)
-                                 (cl-remove 'currentModelId models
-                                            :key #'car :test #'eq)))))
-                 (agent-ide-renderer-update-header session)
-                 (unless silent
-                   (agent-ide-renderer-append-status
-                    session
-                    (format "Model set: %s" model-id))))
-   :on-failure (lambda (error)
-                 (unless silent
-                   (agent-ide-renderer-append-error
-                    session
-                    (or (map-elt error 'message)
-                        (format "set_model failed: %S" error)))))))
+  (if-let* ((config (agent-ide-config-category session "model")))
+      (agent-ide-config-set session (map-elt config 'id) model-id)
+    (agent-ide--assert-ready session)
+    (agent-ide-protocol-send-request
+     session
+     (acp-make-session-set-model-request
+      :session-id (agent-ide-session-acp-session-id session)
+      :model-id model-id)
+     :on-success (lambda (_response)
+                   ;; Update cached model id in session models data.
+                   (let ((models (agent-ide-session-models session)))
+                     (when (listp models)
+                       (setf (agent-ide-session-models session)
+                             (cons (cons 'currentModelId model-id)
+                                   (cl-remove 'currentModelId models
+                                              :key #'car :test #'eq)))))
+                   (agent-ide-renderer-update-header session)
+                   (unless silent
+                     (agent-ide-renderer-append-status
+                      session
+                      (format "Model set: %s" model-id))))
+     :on-failure (lambda (error)
+                   (unless silent
+                     (agent-ide-renderer-append-error
+                      session
+                      (or (map-elt error 'message)
+                          (format "set_model failed: %S" error))))))))
 
 (defun agent-ide-protocol-new-session (session)
   "Create a new ACP session for SESSION."
@@ -161,6 +179,7 @@ When SILENT is non-nil, suppress status messages."
                        (map-elt response 'modes))
                  (setf (agent-ide-session-models session)
                        (map-elt response 'models))
+                 (agent-ide-config-update session (map-elt response 'configOptions))
                  (agent-ide--set-status session "idle")
                  (agent-ide-renderer-update-header session)
                  (agent-ide-renderer-append-status session "Ready.")
@@ -210,8 +229,7 @@ When SILENT is non-nil, suppress status messages."
          (agent-ide--session-metadata-put session :replay-notifications nil)
          (agent-ide--session-metadata-put session :restoring nil)
          (when (map-contains-key response 'configOptions)
-           (agent-ide--session-metadata-put session :config-options
-                                            (map-elt response 'configOptions)))
+           (agent-ide-config-update session (map-elt response 'configOptions)))
          (dolist (key '(modes models))
            (when (map-contains-key response key)
              (if (eq key 'modes)
@@ -227,14 +245,16 @@ When SILENT is non-nil, suppress status messages."
            (agent-ide-renderer-create-prompt session)))
        :on-failure (lambda (error) (agent-ide--restore-failed session error))))))
 
-(defun agent-ide-protocol--prompt-content (prompt)
-  "Return ACP content blocks for PROMPT."
-  (vector `((type . "text")
-            (text . ,(substring-no-properties prompt)))))
+(defun agent-ide-protocol--prompt-content (prompt &optional attachments)
+  "Return text and image content blocks for PROMPT and ATTACHMENTS."
+  (vconcat (unless (string-empty-p prompt)
+             (list `((type . "text") (text . ,(substring-no-properties prompt)))))
+           (mapcar (lambda (item) (plist-get item :content)) attachments)))
 
-(defun agent-ide-protocol-send-prompt (session prompt)
-  "Send PROMPT to SESSION."
+(defun agent-ide-protocol-send-prompt (session prompt &optional attachments)
+  "Send PROMPT and optional image ATTACHMENTS to SESSION."
   (agent-ide--assert-ready session)
+  (when attachments (agent-ide-attachment-check session))
   (agent-ide--session-metadata-put session :has-transcript t)
   (agent-ide--set-status session "running")
   (agent-ide-renderer-update-header session)
@@ -243,7 +263,7 @@ When SILENT is non-nil, suppress status messages."
    session
    (acp-make-session-prompt-request
     :session-id (agent-ide-session-acp-session-id session)
-    :prompt (agent-ide-protocol--prompt-content prompt))
+    :prompt (agent-ide-protocol--prompt-content prompt attachments))
    :on-success (lambda (response)
                  (when-let* ((usage (map-elt response 'usage)))
                    (setf (agent-ide-session-usage session) usage))
@@ -260,6 +280,7 @@ When SILENT is non-nil, suppress status messages."
                  (run-hook-with-args 'agent-ide-prompt-response-functions
                                      session response))
    :on-failure (lambda (error)
+                 (when attachments (agent-ide-attachment-restore session attachments))
                  (agent-ide-renderer-reset-stream session)
                  (agent-ide--set-status session "idle")
                  (agent-ide-renderer-update-header session)
@@ -271,6 +292,29 @@ When SILENT is non-nil, suppress status messages."
                  (run-hook-with-args 'agent-ide-prompt-failure-functions
                                      session error))))
 
+(defun agent-ide-protocol-cancel-permissions (session &optional request-id)
+  "Cancel SESSION's pending approvals, or only the one with REQUEST-ID."
+  (let (keys failure)
+    (maphash (lambda (key record)
+               (when (and (plist-get record :permission) (plist-get record :pending)
+                          (or (null request-id)
+                              (equal request-id (plist-get record :request-id))))
+                 (push key keys)))
+             (agent-ide-renderer-active-tools session))
+    (dolist (key keys)
+      (condition-case err
+          (agent-ide-renderer-respond-permission session key nil)
+        (error (setq failure err))))
+    (when failure (signal (car failure) (cdr failure)))))
+
+(defun agent-ide-protocol-cancel-interactions (session &optional request-id)
+  "Resolve pending user interactions for SESSION or REQUEST-ID."
+  (let (failure)
+    (dolist (fn '(agent-ide-protocol-cancel-permissions agent-ide-elicitation-cancel-all))
+      (condition-case err (funcall fn session request-id)
+        (error (setq failure err))))
+    (when failure (signal (car failure) (cdr failure)))))
+
 (defun agent-ide-protocol-cancel (session)
   "Cancel SESSION's pending prompt without trapping an idle session.
 Repeated cancellation leaves the original request waiting for its response."
@@ -278,6 +322,7 @@ Repeated cancellation leaves the original request waiting for its response."
     (user-error "No active agent ACP session"))
   (cond
    ((equal (agent-ide-session-status session) "interrupting")
+    (agent-ide-protocol-cancel-interactions session)
     (message "Interrupt already requested; waiting for the active turn"))
    ((not (and (equal (agent-ide-session-status session) "running")
               (seq-some (lambda (request)
@@ -302,6 +347,7 @@ Repeated cancellation leaves the original request waiting for its response."
            (agent-ide-renderer-update-header session))
          (signal (car err) (cdr err)))))
     (agent-ide-renderer-update-header session)
+    (agent-ide-protocol-cancel-interactions session)
     (agent-ide-renderer-append-status session "Interrupt requested."))))
 
 (defun agent-ide-protocol-respond-permission (session request-id option-id)

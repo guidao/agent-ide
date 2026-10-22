@@ -171,8 +171,9 @@ DOT is the visibility marker (●/○).  Ellipsis is \"..\"."
     name))
 
 (defun agent-ide-sidebar--pending-permission-p (session)
-  "Return non-nil when SESSION has an unanswered permission prompt."
-  (let ((found nil))
+  "Return non-nil when SESSION has an unanswered approval or structured question."
+  (let ((found (when-let* ((forms (agent-ide--session-metadata-get session :elicitations)))
+                 (> (hash-table-count forms) 0))))
     (maphash
      (lambda (_key record)
        (when (and (plist-get record :permission)
@@ -220,8 +221,8 @@ When SELECTED-P is non-nil, apply `agent-ide-sidebar-current'.
 Visibility indicator uses ●/○ independently.
 Long project names are truncated with \"..\" so status stays visible."
   (let* ((dot (if (agent-ide-sidebar--session-visible-p session) "●" "○"))
-         (project (agent-ide--directory-name
-                   (agent-ide-session-directory session)))
+         (project (or (agent-ide--session-title session)
+                      (agent-ide--directory-name (agent-ide-session-directory session))))
          (index (agent-ide-sidebar--buffer-index session))
          (status (agent-ide-sidebar--display-status session))
          (status-text (format "[%s]" status))

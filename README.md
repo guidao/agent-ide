@@ -79,7 +79,13 @@ Type your prompt and press `C-c C-m` (or `Return` with a configured binding) to 
 | `agent-ide-restart` | `C-c C-r` | Kill and restart the current session |
 | `agent-ide-resume` | `C-c C-z` | Reconnect a disconnected session, otherwise choose project history; prefix shows all projects |
 | `agent-ide-resume-history` | — | Choose backend sessions via `session/list`; prefix includes all projects |
-| `agent-ide-set-model` | `C-c C-s` | Switch the agent model (completing-read) |
+| `agent-ide-set-model` | `C-c C-s` | Switch model; prefer standard config options, with legacy fallback |
+| `agent-ide-set-config` | `C-c C-t` | Choose a backend setting and value (model, reasoning, mode, toggles) |
+| `agent-ide-answer-question` | `C-c C-e` | Open a pending structured question for review and submission |
+| `agent-ide-attach-image` | `C-c C-f` | Attach a PNG, JPEG, GIF or WebP file to the next prompt |
+| `agent-ide-paste-image` | `C-c C-v` | Attach an image from the clipboard |
+| `agent-ide-remove-attachment` | — | Remove an image from the current draft |
+| `agent-ide-reconnect` | — | Reconnect an idle session, preserving its ID, transcript and draft |
 | `agent-ide-yank-region` | `C-c C-y` | Insert the active region as file+line context |
 | `agent-ide-sidebar` | `C-c C-b` | Focus the session sidebar |
 | `agent-ide-switch-buffer` | `C-c C-j` | Choose an open agent buffer with minibuffer completion |
@@ -138,6 +144,36 @@ listing reports an error; reconnecting an open buffer by its session ID still
 works. The backend remains responsible for retaining conversations.
 Missing session IDs, removed directories and unsupported capabilities are
 reported without falling back to a new conversation.
+
+### Session settings, questions and images
+
+`C-c C-t` displays the settings reported by the backend, including grouped
+choices and boolean switches. The full configuration is refreshed after a
+change or `config_option_update`; unsupported option types are ignored.
+`C-c C-s` remains the model shortcut. Session titles from `session_info_update`
+appear in the header and sidebar; buffer names remain stable.
+
+Structured questions appear in the transcript with an **Answer question**
+button. `C-c C-e` opens an editable form with **Submit**, **Decline** and
+**Cancel** controls. Required fields, typed values, enum choices and basic
+length/range constraints are checked before submission. Optional fields have
+an **Include** checkbox. Closing the form or pressing `C-c C-k` cancels it.
+Only form-mode elicitation is advertised; URL-mode authentication is not
+implemented. Cancelling a turn also cancels pending approvals and questions.
+
+Images stay attached to the draft until submission; the prompt displays their
+names with a clickable **×** to remove them. Backspace at the start of the
+prompt removes the last image; `C-u C-c C-v` removes the sole image or opens
+an attachment picker. Submit text and images together, or an image alone. Failed submissions
+restore their attachments without removing newer ones. Images are kept in
+memory, with a default limit of 20 MiB each, configurable via
+`agent-ide-attachment-max-bytes`. Clipboard paste uses Emacs clipboard support
+or `pngpaste` on macOS. The backend must advertise image input support.
+
+After hot-reloading this update, existing sessions need
+`M-x agent-ide-reconnect` once they are idle to negotiate elicitation and boolean
+configuration support and receive their initial configuration. Existing image
+capabilities, cancellation fixes and incoming title updates work immediately.
 
 ### Inline interaction (gptel-inline style)
 
@@ -409,6 +445,9 @@ Emacs and `AGENT_IDE_TEST_GIF` pointing to a local animation; batch tests skip i
 agent-ide.el              Entry point, defcustom, require all
 ├── agent-ide-core.el     Session struct, helpers, buffer management
 ├── agent-ide-history.el  ACP session discovery and completion candidates
+├── agent-ide-config.el   Backend configuration selectors
+├── agent-ide-elicitation.el  Structured question forms and cancellation
+├── agent-ide-attachment.el   Draft image attachments and clipboard input
 ├── agent-ide-renderer.el Transcript rendering, markdown, diff, folds, faces
 ├── agent-ide-stream.el   Batched streaming Markdown and completed-block reuse
 ├── agent-ide-latex.el    Math recognition and asynchronous TeX formula previews

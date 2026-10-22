@@ -733,6 +733,9 @@ Called only after a successful load.  Historical messages never run live hooks."
 (defun agent-ide-transcript--render-notification (session notification)
   "Render NOTIFICATION for SESSION without queueing history replay."
   (pcase (map-elt notification 'method)
+    ("$/cancel_request"
+     (when-let* ((id (agent-ide--get-in notification '(params requestId))))
+       (agent-ide-protocol-cancel-interactions session id)))
     ("session/update"
      (let* ((update (agent-ide--get-in notification '(params update)))
             (kind (map-elt update 'sessionUpdate))
@@ -792,6 +795,15 @@ Called only after a successful load.  Historical messages never run live hooks."
            nil
            nil
            t))
+         ("config_option_update"
+          (agent-ide-config-update session (map-elt update 'configOptions)))
+         ("session_info_update"
+          (dolist (field '((title . :title) (updatedAt . :updated-at)))
+            (when (map-contains-key update (car field))
+              (agent-ide--session-metadata-put session (cdr field) (map-elt update (car field)))))
+          (agent-ide-renderer-update-header session)
+          (when (fboundp 'agent-ide-sidebar-on-sessions-changed)
+            (agent-ide-sidebar-on-sessions-changed)))
          ("current_mode_update"
           (setf (agent-ide-session-modes session) update)
           (agent-ide-renderer-update-header session))
@@ -852,11 +864,17 @@ Called only after a successful load.  Historical messages never run live hooks."
         (if option-id
             (format "Selected: %s" option-id)
           "Cancelled")
-        nil)))))
+        nil)))
+    (let ((record (agent-ide-renderer--tool-record session key)))
+      (agent-ide-renderer--put-tool-record session key (plist-put record :request-id request-id)))
+    (when (equal (agent-ide-session-status session) "interrupting")
+      (agent-ide-renderer-respond-permission session key nil))))
 
 (defun agent-ide-transcript-handle-request (session request)
   "Handle incoming ACP REQUEST for SESSION."
   (pcase (map-elt request 'method)
+    ("elicitation/create"
+     (agent-ide-elicitation-handle session request))
     ("session/request_permission"
      (agent-ide-transcript--handle-permission session request))
     ("fs/read_text_file"

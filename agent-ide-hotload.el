@@ -20,12 +20,15 @@
 
 (defconst agent-ide-hotload--files
   '("agent-ide-core.el"
+    "agent-ide-config.el"
     "agent-ide-history.el"
-    "agent-ide-protocol.el"
     "agent-ide-latex.el"
     "agent-ide-media.el"
     "agent-ide-stream.el"
     "agent-ide-renderer.el"
+    "agent-ide-attachment.el"
+    "agent-ide-elicitation.el"
+    "agent-ide-protocol.el"
     "agent-ide-session-mode.el"
     "agent-ide-session.el"
     "agent-ide-transcript.el"

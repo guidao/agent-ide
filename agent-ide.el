@@ -94,7 +94,7 @@ Set this to nil or zero to keep the icon stationary."
 
 ;;;###autoload
 (defcustom agent-ide-model nil
-  "Default model ID set after session creation via `session/set_model'.
+  "Default model ID applied after session creation using the backend config API.
 When non-nil, the model is applied immediately after each new session
 is created.  Use `agent-ide-set-model' to switch models interactively."
   :type '(choice (const :tag "Agent default" nil)

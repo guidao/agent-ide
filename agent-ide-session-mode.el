@@ -163,6 +163,11 @@ With prefix argument ALWAYS, select the always-allow option."
 
 ;; Update the existing map as well when this file is hot-reloaded.
 (define-key agent-ide-session-mode-map (kbd "C-c C-j") #'agent-ide-switch-buffer)
+(define-key agent-ide-session-mode-map (kbd "C-c C-t") #'agent-ide-set-config)
+(define-key agent-ide-session-mode-map (kbd "C-c C-e") #'agent-ide-answer-question)
+(define-key agent-ide-session-mode-map (kbd "C-c C-f") #'agent-ide-attach-image)
+(define-key agent-ide-session-mode-map (kbd "C-c C-v") #'agent-ide-paste-image)
+(define-key agent-ide-session-mode-map [remap delete-backward-char] #'agent-ide-attachment-backspace)
 
 (defvar agent-ide-session-prompt-minor-mode-map
   (let ((map (make-sparse-keymap)))

@@ -72,6 +72,7 @@ Allowed values are nil, `vertical', and `horizontal'.")
 
 (defun agent-ide--invalidate-connection (session)
   "Invalidate pending requests and old permission actions in SESSION."
+  (agent-ide-elicitation-discard session)
   (agent-ide--session-metadata-put
    session :connection-generation
    (1+ (or (agent-ide--session-metadata-get session :connection-generation) 0)))
@@ -156,6 +157,7 @@ Allowed values are nil, `vertical', and `horizontal'.")
 (defun agent-ide--cleanup-session (session)
   "Stop and remove SESSION."
   (when (agent-ide-session-p session)
+    (agent-ide-elicitation-discard session)
     (when-let* ((client (agent-ide-session-client session)))
       ;; Late callbacks from shutdown must not modify the buffer or metadata.
       (setf (agent-ide-session-client session) nil)
@@ -291,8 +293,22 @@ Creates a fresh editable prompt.  Does not send to the agent."
 (defun agent-ide-deliver-prompt (session prompt)
   "Freeze PROMPT as a user line in SESSION and send it via ACP."
   (agent-ide--assert-ready session)
-  (agent-ide-freeze-user-prompt session prompt)
-  (agent-ide-protocol-send-prompt session prompt))
+  (let ((attachments (agent-ide-attachment-list session)))
+    (when attachments (agent-ide-attachment-check session))
+    (agent-ide--session-metadata-put session :attachments nil)
+    (condition-case err
+        (progn
+          (agent-ide-freeze-user-prompt session prompt)
+          (if attachments
+              (progn
+                (agent-ide-renderer-append-status
+                 session (concat "Attached images: "
+                                 (mapconcat (lambda (item) (plist-get item :name)) attachments ", ")))
+                (agent-ide-protocol-send-prompt session prompt attachments))
+            (agent-ide-protocol-send-prompt session prompt)))
+      (error
+       (agent-ide-attachment-restore session attachments)
+       (signal (car err) (cdr err))))))
 
 ;;;###autoload
 (defun agent-ide-submit ()
@@ -302,7 +318,8 @@ Creates a fresh editable prompt.  Does not send to the agent."
                       (user-error "No Agent IDE session")))
          (prompt (agent-ide-renderer-current-input session)))
     (agent-ide--assert-ready session)
-    (when (string-empty-p (string-trim prompt))
+    (when (and (string-empty-p (string-trim prompt))
+               (not (agent-ide-attachment-list session)))
       (user-error "Prompt is empty"))
     (unless (run-hook-with-args-until-success
              'agent-ide-pre-submit-functions session prompt)
@@ -329,8 +346,9 @@ Creates a fresh editable prompt.  Does not send to the agent."
       (kill-buffer buffer))
     (agent-ide--start-session directory)))
 
-(defun agent-ide--resume-session (session)
-  "Reconnect SESSION in its existing buffer, preserving the current draft."
+(defun agent-ide--resume-session (session &optional force)
+  "Reconnect SESSION in its existing buffer, preserving the current draft.
+With FORCE, reconnect even when the existing connection is idle."
   (unless (agent-ide-session-acp-session-id session)
     (user-error "This session has no saved ID; create a new session"))
   (when (member (agent-ide-session-status session)
@@ -340,7 +358,7 @@ Creates a fresh editable prompt.  Does not send to the agent."
     (user-error "Session directory no longer exists: %s"
                 (agent-ide-session-directory session)))
   (agent-ide--display-buffer (agent-ide-session-buffer session))
-  (if (and (equal (agent-ide-session-status session) "idle")
+  (if (and (not force) (equal (agent-ide-session-status session) "idle")
            (process-live-p (map-elt (agent-ide-session-client session) :process)))
       (message "Session is already connected")
     (let ((old-client (agent-ide-session-client session)))
@@ -361,6 +379,14 @@ Creates a fresh editable prompt.  Does not send to the agent."
            session (lambda () (agent-ide-protocol-restore-session session))))
       (error (agent-ide--restore-failed
               session `((message . ,(error-message-string err))))))))
+
+;;;###autoload
+(defun agent-ide-reconnect ()
+  "Reconnect the current idle session to negotiate new client capabilities.
+Keep the session ID, transcript and draft.  Never interrupt an active turn."
+  (interactive)
+  (agent-ide--resume-session
+   (or (agent-ide--session-for-buffer) (user-error "No Agent IDE session")) t))
 
 (defun agent-ide--resume-entry (entry)
   "Open or restore a backend session ENTRY with its discovery configuration."
@@ -387,6 +413,8 @@ Creates a fresh editable prompt.  Does not send to the agent."
       (user-error "Session directory no longer exists: %s" directory))
     (let ((session (or existing (agent-ide--create-session directory t))))
       (agent-ide--session-metadata-put session :title (map-elt entry 'title))
+      (agent-ide--session-metadata-put session :updated-at (map-elt entry 'updatedAt))
+      (agent-ide-renderer-update-header session)
       (unless existing
         (setf (agent-ide-session-acp-session-id session) id)
         (agent-ide--set-status session "disconnected"))
@@ -502,17 +530,19 @@ Interactively, choose from the available models reported by the agent."
    (list
     (let* ((session (or (agent-ide--find-session-for-buffer)
                         (user-error "No Agent IDE session")))
-           (models-response (agent-ide-session-models session))
-           (available (agent-ide-renderer--models-list models-response))
-           (candidates (agent-ide-renderer--model-completion-alist
-                        available)))
+           (config (agent-ide-config-category session "model"))
+           (candidates (if config (agent-ide-config-choices config)
+                         (agent-ide-renderer--model-completion-alist
+                          (agent-ide-renderer--models-list (agent-ide-session-models session))))))
       (unless candidates
         (user-error "No models available from agent"))
       (let ((choice (completing-read "Model: " candidates nil t)))
         (or (cdr (assoc choice candidates)) choice)))))
   (let ((session (or (agent-ide--find-session-for-buffer)
                      (user-error "No Agent IDE session"))))
-    (agent-ide-protocol-set-model session model-id)))
+    (if-let* ((config (agent-ide-config-category session "model")))
+        (agent-ide-config-set session (map-elt config 'id) model-id)
+      (agent-ide-protocol-set-model session model-id))))
 
 (defun agent-ide--find-session-for-buffer ()
   "Find a agent-ide session matching the current buffer's project.
