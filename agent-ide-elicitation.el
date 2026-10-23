@@ -85,7 +85,7 @@
   (agent-ide-renderer-update-tool session (plist-get record :key)
                                   "Question" (format "Response: %s" action) "completed")
   (when (buffer-live-p (plist-get record :buffer))
-    (kill-buffer (plist-get record :buffer))))
+    (quit-windows-on (plist-get record :buffer) t)))
 
 (defun agent-ide-elicitation-cancel-all (session &optional request-id)
   "Cancel SESSION's forms, optionally only REQUEST-ID."
@@ -103,7 +103,8 @@
   "Invalidate SESSION's forms after disconnect, without sending to a new client."
   (maphash (lambda (_id record)
              (setf (plist-get record :pending) nil)
-             (when (buffer-live-p (plist-get record :buffer)) (kill-buffer (plist-get record :buffer))))
+             (when (buffer-live-p (plist-get record :buffer))
+               (quit-windows-on (plist-get record :buffer) t)))
            (agent-ide-elicitation--table session))
   (clrhash (agent-ide-elicitation--table session)))
 
