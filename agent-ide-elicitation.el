@@ -113,11 +113,53 @@
   (let ((content (make-hash-table :test 'equal)))
     (dolist (field fields)
       (pcase-let ((`(,name ,schema ,widget ,include) field))
-        (when (or (eq include t) (widget-value include))
+        (when (cond ((eq include t) t)
+                    ((functionp include) (funcall include))
+                    (t (widget-value include)))
           (condition-case err
               (puthash name (agent-ide-elicitation--value schema (widget-value widget)) content)
             (error (user-error "%s: %s" name (error-message-string err)))))))
     (agent-ide-elicitation-finish session record "accept" content)))
+
+(defun agent-ide-elicitation--custom-fields (schema)
+  "Return custom-field/question name pairs for SCHEMA's Other answers.
+Recognize the paired fields supplied by the question adapter, leaving
+unrelated optional text fields alone."
+  (let ((properties (map-elt schema 'properties)) pairs)
+    (dolist (property properties)
+      (let* ((name (format "%s" (car property)))
+             (field (cdr property))
+             (custom-name (concat name "_custom"))
+             (custom (cdr (seq-find
+                           (lambda (entry) (equal (format "%s" (car entry)) custom-name))
+                           properties))))
+        (when (and (equal (map-elt field 'type) "string")
+                   (rassoc "Other (write below)" (agent-ide-elicitation--choices field))
+                   (equal (map-elt custom 'type) "string")
+                   (not (agent-ide-elicitation--choices custom))
+                   (not (member custom-name (append (map-elt schema 'required) nil))))
+          (push (cons custom-name name) pairs))))
+    pairs))
+
+(defun agent-ide-elicitation--custom-input (choice schema)
+  "Create an input for SCHEMA beneath CHOICE, visible only for Other.
+Return (WIDGET INCLUDE), retaining the draft when another answer is chosen."
+  (let* ((start (point))
+         (input (widget-create 'editable-field :size 60 :format "%v\n"
+                               (or (map-elt schema 'default) "")))
+         (overlay (make-overlay start (point)))
+         (include (lambda () (equal (widget-value choice) "Other (write below)")))
+         (update (lambda (&optional focus)
+                   (if (funcall include)
+                       (progn
+                         (overlay-put overlay 'invisible nil)
+                         (widget-apply input :activate)
+                         (when focus (goto-char (widget-field-start input))))
+                     (widget-apply input :deactivate)
+                     (overlay-put overlay 'invisible t)))))
+    (widget-put choice :notify (lambda (&rest _) (funcall update t)))
+    (funcall update)
+    (list input include)))
 
 (defun agent-ide-elicitation-open (session record)
   "Open an editable review form for pending RECORD from SESSION."
@@ -125,8 +167,9 @@
     (user-error "This question is no longer pending"))
   (if (buffer-live-p (plist-get record :buffer))
       (pop-to-buffer (plist-get record :buffer))
-    (let ((buffer (generate-new-buffer "*Agent question*"))
-          (schema (plist-get record :schema)) fields)
+    (let* ((buffer (generate-new-buffer "*Agent question*"))
+           (schema (plist-get record :schema))
+           (custom-fields (agent-ide-elicitation--custom-fields schema)) fields)
       (setf (plist-get record :buffer) buffer)
       (with-current-buffer buffer
         (kill-all-local-variables)
@@ -135,7 +178,9 @@
                                    (car (agent-ide--session-metadata-get session :command)) "Agent")
                                (buffer-name (agent-ide-session-buffer session))
                                (plist-get record :message)))
-        (dolist (property (map-elt schema 'properties))
+        (dolist (property (seq-remove
+                          (lambda (entry) (assoc (format "%s" (car entry)) custom-fields))
+                          (map-elt schema 'properties)))
           (let* ((name (if (symbolp (car property)) (symbol-name (car property)) (car property)))
                  (field (cdr property))
                  (type (map-elt field 'type))
@@ -156,18 +201,31 @@
                     (apply #'widget-create 'checklist :value (append default nil)
                            (mapcar (lambda (choice) `(const :tag ,(car choice) ,(cdr choice))) choices)))
                    (choices
-                    (apply #'widget-create 'menu-choice :value (or default (cdar choices))
+                    (apply #'widget-create 'radio-button-choice
+                           :value (or default (cdar choices))
+                           :button-args '(:on "[X]" :off "[ ]"
+                                          :on-glyph "checked" :off-glyph "unchecked")
                            (mapcar (lambda (choice) `(const :tag ,(car choice) ,(cdr choice))) choices)))
                    (t (widget-create 'editable-field :size 60
                                      (if (null default) "" (format "%s" default))))))
             (push (list name field widget include) fields)
+            (when-let* ((custom-name (car (rassoc name custom-fields)))
+                        (custom-schema
+                         (cdr (seq-find
+                               (lambda (entry) (equal (format "%s" (car entry)) custom-name))
+                               (map-elt schema 'properties)))))
+              (pcase-let ((`(,input ,selected)
+                           (agent-ide-elicitation--custom-input widget custom-schema)))
+                (push (list custom-name custom-schema input selected) fields)))
             (widget-insert "\n\n")))
         (widget-create 'push-button :notify (lambda (&rest _) (agent-ide-elicitation--submit session record fields)) "Submit")
         (widget-insert "  ")
         (widget-create 'push-button :notify (lambda (&rest _) (agent-ide-elicitation-finish session record "decline")) "Decline")
         (widget-insert "  ")
         (widget-create 'push-button :notify (lambda (&rest _) (agent-ide-elicitation-finish session record "cancel")) "Cancel")
+        (widget-insert "\n\nC-c C-c: Submit    C-c C-k: Cancel\n")
         (use-local-map (copy-keymap widget-keymap))
+        (local-set-key (kbd "C-c C-c") (lambda () (interactive) (agent-ide-elicitation--submit session record fields)))
         (local-set-key (kbd "C-c C-k") (lambda () (interactive) (agent-ide-elicitation-finish session record "cancel")))
         (add-hook 'kill-buffer-hook
                   (lambda ()
